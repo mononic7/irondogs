@@ -60,6 +60,10 @@ button.big { font-size: 18px; padding: 12px 30px; border-radius: 12px; }
 .bottombar { position: absolute; bottom: max(6px, env(safe-area-inset-bottom)); left: 0; right: 0; display: flex; justify-content: center; gap: 8px; padding: 0 8px; }
 .bottombar button { min-width: 72px; padding: 9px 12px; background: rgba(31,35,51,.93); }
 .bottombar button.go { min-width: 96px; background: #c8961c; }
+.bottombar button.pvpbtn { border-color: #c0392b; color: #ffb0a6; }
+input, textarea { -webkit-user-select: text; user-select: text; }
+input[type=text] { font: inherit; color: var(--txt); background: #0b0c12; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; min-width: 0; }
+#pvpStatus { margin-top: 10px; padding: 10px; border-radius: 10px; background: #10131c; border: 1px solid var(--line); min-height: 20px; }
 
 /* edit */
 .hint { background: rgba(22,25,37,.92); border: 1px solid var(--line); border-radius: 10px; padding: 7px 12px; font-size: 13px; flex: 1; }
@@ -162,6 +166,7 @@ textarea { width: 100%; height: 80px; background: #0b0c12; color: var(--txt); bo
     </div>
     <div class="bottombar">
       <button class="go" data-panel="missions">▶ 출격</button>
+      <button data-panel="pvp" class="pvpbtn">⚔ 대전</button>
       <button data-panel="char">캐릭터</button>
       <button data-panel="weapons">무기</button>
       <button data-panel="gear">장비</button>
@@ -1016,7 +1021,8 @@ function newSave() {
     themes: { floor: ['metal'], wall: ['concrete'] },
     record: { missions: 0, kills: 0, deaths: 0, best: 0 },
     offers: null, offerSeed: 1,
-    settings: { sound: true },
+    settings: { sound: true, server: '' }, name: '',
+    pvp: { w: 0, l: 0, rating: 1000 },
   };
 }
 
@@ -1054,16 +1060,38 @@ function gearTotals() {
   return t;
 }
 function playerStats() {
-  const g = gearTotals(), st = S.stats, bonus = roomBonus();
+  return Object.assign(statsFromCard(myCard()), { rewardMul: 1 + roomBonus().reward });
+}
+// ---------- battle card: everything another player needs to rebuild my fighter ----------
+function myCard() {
   return {
-    maxHp: Math.round(100 + st.vit * 12 + g.hp + (S.lvl - 1) * 4),
-    armor: st.def * 3 + g.armor,
+    v: 1, name: (S.name || '독스').slice(0, 12), lvl: S.lvl, stats: Object.assign({}, S.stats),
+    weapons: S.loadout.filter(k => k && S.weapons[k]).map(k => ({ key: k, lvl: S.weapons[k].lvl, paint: S.weapons[k].paint })),
+    gear: equippedItems().map(it => ({ slot: it.slot, rarity: it.rarity, level: it.level, stats: Object.assign({}, it.stats), color: it.color, name: it.name })),
+    look: lookOf(), rating: (S.pvp && S.pvp.rating) || 1000,
+  };
+}
+// fairLvl: when set, level-dependent numbers are rescaled to that level (stat point ratio and gear rarity are kept)
+function statsFromCard(card, fairLvl) {
+  const L = fairLvl || card.lvl, st = Object.assign({ vit: 0, atk: 0, def: 0, agi: 0 }, card.stats);
+  if (fairLvl) {
+    const sum = st.vit + st.atk + st.def + st.agi, target = 3 * (L - 1);
+    for (const k in st) st[k] = sum ? st[k] * target / sum : target / 4;
+  }
+  const g = { hp: 0, armor: 0, speed: 0, dmg: 0, crit: 0, regen: 0, rate: 0 };
+  (card.gear || []).forEach(it => {
+    const f = fairLvl ? (1 + L * 0.18) / (1 + it.level * 0.18) : 1;
+    for (const k in it.stats) g[k] += it.stats[k] * f;
+  });
+  return {
+    maxHp: Math.round(100 + st.vit * 12 + g.hp + (L - 1) * 4),
+    armor: Math.round(st.def * 3 + g.armor),
     speed: 72 * (1 + st.agi * 0.03 + g.speed / 100),
     dmgMul: 1 + st.atk * 0.04 + g.dmg / 100,
     rateMul: 1 + st.agi * 0.02 + g.rate / 100,
     crit: 5 + g.crit,
     regen: g.regen,
-    rewardMul: 1 + bonus.reward,
+    rewardMul: 1,
   };
 }
 function lookOf() {
@@ -1302,23 +1330,7 @@ function startMission(def) {
     return { key: k, st, ammo: st.mag, reloadT: 0, paint: S.weapons[k].paint };
   });
   m.player = { x: g.start.cx * T + 8, y: g.start.cy * T + 8, r: 5, hp: ps.maxHp, ps, ang: 0, weapons: pw, cur: 0, fireT: 0, hurtT: 0, regenAcc: 0, look: lookOf(), step: 0 };
-  // background
-  m.bg = mkCanvas(W * FT, H * FT);
-  const bx = m.bg.getContext('2d');
-  const isWall = (i, j) => i < 0 || j < 0 || i >= W || j >= H || tiles[j * W + i] === TILE_WALL;
-  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
-    if (isWall(i, j)) wallTileF(bx, i * FT, j * FT, th, !isWall(i, j + 1), i, j);
-    else floorTileF(bx, i * FT, j * FT, th, i + def.seed % 97, j);
-  }
-  // ambient occlusion next to walls
-  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
-    if (isWall(i, j)) continue;
-    const x = i * FT, y = j * FT;
-    if (isWall(i, j - 1)) { const g = bx.createLinearGradient(0, y, 0, y + 12); g.addColorStop(0, 'rgba(0,0,0,0.45)'); g.addColorStop(1, 'rgba(0,0,0,0)'); bx.fillStyle = g; bx.fillRect(x, y, FT, 12); }
-    if (isWall(i - 1, j)) { const g = bx.createLinearGradient(x, 0, x + 7, 0); g.addColorStop(0, 'rgba(0,0,0,0.35)'); g.addColorStop(1, 'rgba(0,0,0,0)'); bx.fillStyle = g; bx.fillRect(x, y, 7, FT); }
-    if (isWall(i + 1, j)) { const g = bx.createLinearGradient(x + FT, 0, x + FT - 5, 0); g.addColorStop(0, 'rgba(0,0,0,0.3)'); g.addColorStop(1, 'rgba(0,0,0,0)'); bx.fillStyle = g; bx.fillRect(x + FT - 5, y, 5, FT); }
-  }
-  m.fogC = mkCanvas(W, H); m.fogX = m.fogC.getContext('2d'); m.fogImg = m.fogX.createImageData(W, H);
+  buildBackground(m);
   M = m;
   // pre-build rotated sprites so the first turns don't stutter
   const kinds = new Set(m.enemies.map(e => e.type));
@@ -1330,6 +1342,25 @@ function startMission(def) {
   updateVis(m, true);
   m.flow = bfs(tiles, W, H, m.player.x >> 4, m.player.y >> 4, t => t === TILE_FLOOR);
   return m;
+}
+function buildBackground(m) {
+  const { W, H, tiles, th } = m, seed = m.def ? m.def.seed : (m.seed || 1);
+  m.bg = mkCanvas(W * FT, H * FT);
+  const bx = m.bg.getContext('2d');
+  const isWall = (i, j) => i < 0 || j < 0 || i >= W || j >= H || tiles[j * W + i] === TILE_WALL;
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    if (isWall(i, j)) wallTileF(bx, i * FT, j * FT, th, !isWall(i, j + 1), i, j);
+    else floorTileF(bx, i * FT, j * FT, th, i + seed % 97, j);
+  }
+  // ambient occlusion next to walls
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    if (isWall(i, j)) continue;
+    const x = i * FT, y = j * FT;
+    if (isWall(i, j - 1)) { const g = bx.createLinearGradient(0, y, 0, y + 12); g.addColorStop(0, 'rgba(0,0,0,0.45)'); g.addColorStop(1, 'rgba(0,0,0,0)'); bx.fillStyle = g; bx.fillRect(x, y, FT, 12); }
+    if (isWall(i - 1, j)) { const g = bx.createLinearGradient(x, 0, x + 7, 0); g.addColorStop(0, 'rgba(0,0,0,0.35)'); g.addColorStop(1, 'rgba(0,0,0,0)'); bx.fillStyle = g; bx.fillRect(x, y, 7, FT); }
+    if (isWall(i + 1, j)) { const g = bx.createLinearGradient(x + FT, 0, x + FT - 5, 0); g.addColorStop(0, 'rgba(0,0,0,0.3)'); g.addColorStop(1, 'rgba(0,0,0,0)'); bx.fillStyle = g; bx.fillRect(x + FT - 5, y, 5, FT); }
+  }
+  m.fogC = mkCanvas(W, H); m.fogX = m.fogC.getContext('2d'); m.fogImg = m.fogX.createImageData(W, H);
 }
 function spawnEnemy(m, type, x, y, awake) {
   const d = ENEMIES[type], L = m.L;
@@ -1408,7 +1439,9 @@ function fire(m, ang) {
       m.enemies.forEach(e => { if (!hit.has(e) && (e.x - x) ** 2 + (e.y - y) ** 2 < (e.r + 2) ** 2) { hit.add(e); const c = crit(); damageEnemy(m, e, st.dmg * ps.dmgMul * (c ? 2 : 1), ang, c); } });
     }
     m.beams.push({ x0: mx, y0: my, x1: ex, y1: ey, t: 0.09, col: '#9ff3f3' });
+    if (m.pvp) m.net({ t: 'b', x0: mx, y0: my, x1: ex, y1: ey });
   } else {
+    if (m.pvp) m.net({ t: 'f', x: Math.round(mx), y: Math.round(my), a: +ang.toFixed(3), k: w.key });
     const n = st.pellets || 1;
     for (let i = 0; i < n; i++) {
       const a = ang + (Math.random() - 0.5) * st.spread * Math.PI / 180, sp = st.speed * (st.flame ? (0.8 + Math.random() * 0.4) : 1);
@@ -1431,6 +1464,7 @@ function swapWeapon(m) {
   p.cur = (p.cur + 1) % p.weapons.length; p.fireT = 0.15; SFX.play('click');
 }
 function damageEnemy(m, e, dmg, ang, crit) {
+  if (e.remote) { e.flash = 0.08; addFloat(m, e.x, e.y - 8, Math.round(dmg), crit ? '#ffd34a' : '#ffffff'); SFX.play('hit', 50); m.onHit(dmg, crit); return; }
   e.hp -= dmg; e.flash = 0.08; e.state = 'chase';
   const kb = e.d.heavy ? 0 : e.d.scale ? 0.5 : 1.5; moveCircle(m, e, Math.cos(ang) * kb, Math.sin(ang) * kb);   // knockback respects walls
   addFloat(m, e.x, e.y - 8, Math.round(dmg), crit ? '#ffd34a' : '#ffffff');
@@ -1462,6 +1496,7 @@ function damageTile(m, x, y, dmg) {
     m.crateHp[k] -= dmg;
     if (m.crateHp[k] <= 0) {
       m.tiles[k] = TILE_FLOOR; puff(m, i * T + 8, j * T + 8, 10, ['#8a6136', '#5a3d22', '#b08250'], 45, 0.5); SFX.play('hit');
+      if (m.pvp) { m.net({ t: 'crate', i, j }); m.flowT = 0; return; }
       if (Math.random() < 0.35) m.pickups.push({ type: 'credit', x: i * T + 8, y: j * T + 8, val: 8 + m.L * 3, bob: 0 });
       else if (Math.random() < 0.15) m.pickups.push({ type: 'med', x: i * T + 8, y: j * T + 8, bob: 0 });
       m.flowT = 0;
@@ -1476,6 +1511,9 @@ function damageTile(m, x, y, dmg) {
       goalProgress(m, 'destroy', 1); m.flowT = 0;
     }
   }
+}
+function boomFx(m, x, y) {   // visual-only explosion (opponent's grenade)
+  SFX.play('boom'); puff(m, x, y, 26, ['#fff2a8', '#f7d54a', '#e67e22', '#c0392b', '#3d3d52'], 90, 0.5); splat(m, x, y, '#14141a', 22);
 }
 function explode(m, x, y, rad, dmg, noTiles) {
   SFX.play('boom'); m.shake = 5;
@@ -1493,6 +1531,7 @@ function hurtPlayer(m, dmg) {
   p.hp -= real; p.hurtT = 0.2; m.shake = Math.max(m.shake, 2);
   addFloat(m, p.x, p.y - 10, Math.round(real), '#ff6b5b');
   SFX.play('hurt', 120);
+  if (m.pvp) { if (p.hp <= 0) { p.hp = 0; puff(m, p.x, p.y, 20, ['#8a2020', '#5e1414'], 60, 0.6); m.onDeath(); } return; }
   if (p.hp <= 0) { p.hp = 0; m.state = 'dead'; m.endT = 1.4; puff(m, p.x, p.y, 20, ['#8a2020', '#5e1414'], 60, 0.6); S.record.deaths++; }
 }
 function goalProgress(m, type, n) {
@@ -1637,7 +1676,7 @@ function updateBullets(m, dt) {
       const t = tileAt(m, b.x, b.y);
       if (t !== TILE_FLOOR) {
         if (b.from === 'p' && (t === TILE_CRATE || t === TILE_GEN)) damageTile(m, b.x, b.y, b.dmg);
-        if (b.explode) explode(m, b.x - b.vx * 0.02, b.y - b.vy * 0.02, b.explode, b.dmg);
+        if (b.explode) (b.from === 'o' ? boomFx : explode)(m, b.x - b.vx * 0.02, b.y - b.vy * 0.02, b.explode, b.dmg);
         else puff(m, b.x - b.vx * 0.01, b.y - b.vy * 0.01, 2, b.flame ? ['#e67e22'] : ['#c8c8d8', '#6b6b85'], 30, 0.15);
         return false;
       }
@@ -1652,10 +1691,12 @@ function updateBullets(m, dt) {
             break;
           }
         }
+      } else if (b.from === 'o') {
+        if ((p.x - b.x) ** 2 + (p.y - b.y) ** 2 < (p.r + 2) ** 2 && !b.flame) { if (b.explode) boomFx(m, b.x, b.y); return false; }   // damage comes from the shooter's 'hit' message
       } else if ((p.x - b.x) ** 2 + (p.y - b.y) ** 2 < (p.r + 2) ** 2) { hurtPlayer(m, b.dmg); return false; }
     }
     b.life -= dt;
-    if (b.life <= 0) { if (b.explode) explode(m, b.x, b.y, b.explode, b.dmg); return false; }
+    if (b.life <= 0) { if (b.explode) (b.from === 'o' ? boomFx : explode)(m, b.x, b.y, b.explode, b.dmg); return false; }
     return true;
   });
 }
@@ -1756,6 +1797,7 @@ function renderMission(ctx, m, t) {
     else if (b.from === 'e' && b.big) { ctx.fillStyle = 'rgba(255,160,40,0.4)'; ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, 6.2832); ctx.fill(); ctx.fillStyle = '#fff0c0'; ctx.fillRect(b.x - 1, b.y - 1, 2, 2); }
     else if (b.from === 'e') { ctx.fillStyle = 'rgba(255,95,162,0.35)'; ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, 6.2832); ctx.fill(); ctx.fillStyle = '#ffd0e4'; ctx.fillRect(b.x - 0.75, b.y - 0.75, 1.5, 1.5); }
     else if (b.explode) { ctx.fillStyle = 'rgba(247,213,74,0.4)'; ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, 6.2832); ctx.fill(); ctx.fillStyle = '#fff2a8'; ctx.fillRect(b.x - 1, b.y - 1, 2, 2); }
+    else if (b.from === 'o') { ctx.strokeStyle = 'rgba(255,120,110,0.95)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx * 0.014, b.y - b.vy * 0.014); ctx.stroke(); }
     else { ctx.strokeStyle = 'rgba(255,225,120,0.9)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx * 0.014, b.y - b.vy * 0.014); ctx.stroke(); }
   });
   m.beams.forEach(o => { ctx.globalAlpha = o.t / 0.09; ctx.strokeStyle = 'rgba(80,220,255,0.6)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(o.x0, o.y0); ctx.lineTo(o.x1, o.y1); ctx.stroke(); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.75; ctx.stroke(); ctx.globalAlpha = 1; });
@@ -1788,6 +1830,243 @@ function renderMinimap(ctx, m, t) {
   if (m.unique && m.unique.announced && m.enemies.includes(m.unique)) { ctx.fillStyle = '#ffb020'; ctx.fillRect(ox + (m.unique.x / T) * s - 2, oy + (m.unique.y / T) * s - 2, 4, 4); }
   ctx.fillStyle = m.exit.active ? '#4fe08a' : '#2a6a40'; ctx.fillRect(ox + m.exit.tx * s - 1, oy + m.exit.ty * s - 1, s + 2, s + 2);
   if ((t * 3 | 0) % 2) { ctx.fillStyle = '#ffffff'; ctx.fillRect(ox + (m.player.x / T) * s - 2, oy + (m.player.y / T) * s - 2, 4, 4); }
+}
+
+// ===================================================================
+// pvp.js - real-time online 1v1 duel (needs the relay server in /server)
+// each client simulates its own fighter; the shooter decides hits,
+// the server referees rounds, pickups and the match result
+// ===================================================================
+const PVP_ROUND_TIME = 90, PVP_WIN_ROUNDS = 2, PVP_SEND_HZ = 20, PVP_INTERP_MS = 100;
+
+// ---------------- connection ----------------
+const Net = {
+  ws: null, status: 'off', ping: 0, onMsg: null, _pingT: 0,
+  defaultUrl() {
+    if (S && S.settings.server) return S.settings.server;
+    if (/^https?:$/.test(location.protocol) && !/claude\.ai|claudeusercontent/.test(location.host)) return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    return '';
+  },
+  connect(url, onOpen) {
+    this.close();
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { this.status = 'error'; UI.pvpStatus('서버 주소가 올바르지 않습니다'); return; }
+    this.ws = ws; this.status = 'connecting';
+    ws.onopen = () => { this.status = 'open'; onOpen && onOpen(); this._pingT = setInterval(() => this.send({ t: 'ping', ts: Date.now() }), 2000); };
+    ws.onclose = () => { const was = this.status; this.status = 'off'; clearInterval(this._pingT); if (this.ws === ws) this.ws = null; PVP.onClosed(was); };
+    ws.onerror = () => { this.status = 'error'; };
+    ws.onmessage = ev => { let o; try { o = JSON.parse(ev.data); } catch (e) { return; } if (o.t === 'pong') { this.ping = Date.now() - o.ts; return; } PVP.onMessage(o); };
+  },
+  send(o) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(o)); },
+  close() { if (this.ws) { const w = this.ws; this.ws = null; try { w.close(); } catch (e) { } } clearInterval(this._pingT); this.status = 'off'; },
+};
+
+// ---------------- arena ----------------
+function genArena(seed) {
+  for (let tries = 0; tries < 20; tries++) {
+    const r = rnd32(seed + tries * 101), W = 30, H = 18, tiles = new Uint8Array(W * H).fill(TILE_FLOOR);
+    for (let i = 0; i < W; i++) { tiles[i] = TILE_WALL; tiles[(H - 1) * W + i] = TILE_WALL; }
+    for (let j = 0; j < H; j++) { tiles[j * W] = TILE_WALL; tiles[j * W + W - 1] = TILE_WALL; }
+    const set = (i, j, t) => { if (i > 0 && j > 0 && i < W - 1 && j < H - 1) { tiles[j * W + i] = t; tiles[j * W + (W - 1 - i)] = t; } };   // mirrored
+    // cover blocks on the left half (mirrored to the right)
+    for (let k = 0; k < 7; k++) {
+      const w = 1 + (r() * 3 | 0), h = 1 + (r() * 3 | 0), x = 4 + (r() * (W / 2 - 5 - w) | 0), y = 2 + (r() * (H - 4 - h) | 0);
+      for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) set(i, j, TILE_WALL);
+    }
+    for (let k = 0; k < 6; k++) set(3 + (r() * (W / 2 - 4) | 0), 2 + (r() * (H - 4) | 0), TILE_CRATE);
+    // keep spawns and the centre lane clear
+    for (let j = 7; j <= 10; j++) for (let i = 1; i <= 4; i++) set(i, j, TILE_FLOOR);
+    const spawns = [{ x: 2 * T + 8, y: 8 * T + 8 }, { x: (W - 3) * T + 8, y: 8 * T + 8 }];
+    const d = bfs(tiles, W, H, 2, 8, t => t === TILE_FLOOR);
+    if (d[8 * W + (W - 3)] < 0) continue;
+    const meds = [{ x: (W >> 1) * T, y: 3 * T + 8 }, { x: (W >> 1) * T, y: (H - 4) * T + 8 }].filter(p => tileAt({ W, H, tiles }, p.x, p.y) === TILE_FLOOR);
+    return { W, H, tiles, spawns, meds };
+  }
+  throw new Error('arena');
+}
+
+// ---------------- match state ----------------
+const PVP = {
+  m: null, info: null, lobby: 'idle',
+  // lobby actions (called from the UI)
+  go(kind, code) {
+    const url = (S.settings.server || Net.defaultUrl()).trim();
+    if (!url) { UI.pvpStatus('대전 서버 주소를 먼저 입력하세요'); return; }
+    S.settings.server = url; saveGame();
+    this.lobby = 'connecting'; UI.pvpStatus('서버에 연결 중…');
+    Net.connect(url, () => {
+      Net.send({ t: 'hello', ver: 1, card: myCard() });
+      if (kind === 'quick') Net.send({ t: 'quick', fair: !!S.settings.fair });
+      else if (kind === 'create') Net.send({ t: 'create', fair: !!S.settings.fair });
+      else Net.send({ t: 'join', code: String(code || '').trim() });
+    });
+  },
+  cancel() { Net.send({ t: 'cancel' }); Net.close(); this.lobby = 'idle'; UI.pvpStatus(''); },
+  onClosed(was) {
+    if (this.m && !this.m.ended) { this.endMatch({ winner: null, reason: 'net' }); return; }
+    if (this.lobby !== 'idle') { this.lobby = 'idle'; UI.pvpStatus(was === 'connecting' ? '서버에 연결할 수 없습니다. 주소와 서버 실행 여부를 확인하세요' : '서버 연결이 끊어졌습니다'); }
+  },
+  onMessage(o) {
+    const m = this.m;
+    switch (o.t) {
+      case 'err': UI.pvpStatus('⚠ ' + o.msg); if (!m) { this.lobby = 'idle'; } break;
+      case 'queued': this.lobby = 'waiting'; UI.pvpStatus('상대를 찾는 중… (다른 플레이어가 빠른 대전을 누르면 시작)', true); break;
+      case 'room': this.lobby = 'waiting'; UI.pvpStatus(`방 코드 <b style="font-size:22px;color:var(--acc);letter-spacing:3px">${o.code}</b> — 상대에게 이 코드를 알려 주세요`, true); break;
+      case 'start': this.start(o); break;
+      case 's': if (m) { m.snaps.push({ t: performance.now(), x: o.x, y: o.y, a: o.a, hp: o.hp, mh: o.mh, w: o.w }); if (m.snaps.length > 30) m.snaps.shift(); } break;
+      case 'f': if (m) remoteShot(m, o); break;
+      case 'b': if (m) { m.beams.push({ x0: o.x0, y0: o.y0, x1: o.x1, y1: o.y1, t: 0.09, col: '#ff9a9a' }); SFX.play('laser'); } break;
+      case 'h': if (m && m.phase === 'fight') hurtPlayer(m, Math.min(+o.d || 0, 1500)); break;
+      case 'crate': if (m) { const k = o.j * m.W + o.i; if (m.tiles[k] === TILE_CRATE) { m.tiles[k] = TILE_FLOOR; puff(m, o.i * T + 8, o.j * T + 8, 10, ['#8a6136', '#5a3d22'], 45, 0.5); } } break;
+      case 'took': if (m) tookMed(m, o); break;
+      case 'round': if (m) roundOver(m, o); break;
+      case 'go': if (m) newRound(m, o.round); break;
+      case 'end': this.endMatch(o); break;
+      case 'left': this.endMatch({ winner: m ? m.you : null, reason: 'left' }); break;
+    }
+  },
+  start(o) {
+    this.lobby = 'playing'; UI.closeModal();
+    const you = o.you, cards = o.cards, fairLvl = o.fair ? Math.max(cards[0].lvl, cards[1].lvl) : 0;
+    const a = genArena(o.seed), th = MISSION_THEMES[o.seed % MISSION_THEMES.length];
+    const m = {
+      pvp: true, you, cards, fair: o.fair, fairLvl, seed: o.seed, th, W: a.W, H: a.H, tiles: a.tiles, baseTiles: a.tiles.slice(), arena: a,
+      crateHp: new Float32Array(a.W * a.H).fill(40), explored: new Uint8Array(a.W * a.H), vis: new Uint8Array(a.W * a.H),
+      enemies: [], bullets: [], pickups: [], gens: [], parts: [], floats: [], beams: [], goals: [], gained: { cr: 0, xp: 0, items: [] },
+      kills: 0, time: 0, state: 'play', flow: null, flowT: 0, visT: 0, shake: 0, L: 1, exit: { tx: -9, ty: -9, active: false },
+      score: [0, 0], round: 1, phase: 'count', phaseT: 3, roundT: PVP_ROUND_TIME, sendT: 0, snaps: [], banner: null,
+    };
+    m.net = msg => Net.send(msg);
+    m.onHit = (d, c) => Net.send({ t: 'h', d: Math.round(d), c: c ? 1 : 0 });
+    m.onDeath = () => { if (m.phase === 'fight') { m.phase = 'wait'; Net.send({ t: 'dead', round: m.round }); } };
+    buildBackground(m);
+    // my fighter
+    const mine = cards[you], theirs = cards[1 - you];
+    const ps = statsFromCard(mine, fairLvl);
+    const pw = mine.weapons.map(w => { const st = weaponStats(w.key, w.lvl); return { key: w.key, st, ammo: st.mag, reloadT: 0, paint: w.paint }; });
+    m.player = { x: 0, y: 0, r: 5, hp: ps.maxHp, ps, ang: 0, weapons: pw.length ? pw : [{ key: 'pistol', st: weaponStats('pistol', 0), ammo: 12, reloadT: 0, paint: '#6b6b85' }], cur: 0, fireT: 0, hurtT: 0, look: mine.look, step: 0 };
+    // the opponent, drawn like an enemy but never simulated locally
+    const ops = statsFromCard(theirs, fairLvl);
+    const paint = (theirs.weapons[0] || {}).paint || '#6b6b85';
+    m.opp = { remote: true, type: 'player', d: { kind: 'soldier', unique: true, name: theirs.name, look: Object.assign({}, theirs.look, { V: paint }), r: 5 },
+      x: 0, y: 0, ang: Math.PI, hp: ops.maxHp, maxHp: ops.maxHp, r: 5, flash: 0, state: 'chase', wob: 0, card: theirs };
+    m.enemies.push(m.opp);
+    for (let d = 0; d < DIRS; d++) { const ang = d / DIRS * Math.PI * 2; m.player.weapons.forEach(w => charSprite('soldier', Object.assign({}, m.player.look, { V: w.paint }), ang)); charSprite('soldier', m.opp.d.look, ang); }
+    this.m = M = m;
+    newRound(m, 1);
+    Game.mode = 'pvp'; Game.paused = false; resetInput(); UI.show('hud');
+    UI.toast(`⚔ ${mine.name} vs ${theirs.name}${o.fair ? ' · 레벨 보정 Lv ' + fairLvl : ''}`, 3000);
+  },
+  endMatch(o) {
+    const m = this.m; if (!m || m.ended) { Net.close(); return; }
+    m.ended = true; Net.close(); this.lobby = 'idle';
+    const win = o.winner === m.you, draw = o.winner === null;
+    let dr = 0, cr = 0;
+    if (!draw || o.reason === 'left') {
+      const oppR = m.cards[1 - m.you].rating || 1000, my = S.pvp.rating, exp = 1 / (1 + Math.pow(10, (oppR - my) / 400));
+      dr = Math.round(32 * ((win ? 1 : 0) - exp)); S.pvp.rating = Math.max(100, my + dr);
+      if (win) { S.pvp.w++; cr = 150 + S.lvl * 15; } else { S.pvp.l++; cr = 40; }
+      S.credits += cr;
+    }
+    saveGame(true);
+    UI.openPanel('pvpResult', { win, draw, reason: o.reason, score: m.score.slice(), you: m.you, dr, cr, opp: m.cards[1 - m.you].name });
+  },
+};
+
+function remoteShot(m, o) {
+  const st = WEAPONS[o.k]; if (!st) return;
+  const n = st.pellets || 1;
+  for (let i = 0; i < n; i++) {
+    const a = o.a + (Math.random() - 0.5) * st.spread * Math.PI / 180, sp = st.speed * (st.flame ? (0.8 + Math.random() * 0.4) : 1);
+    m.bullets.push({ x: o.x, y: o.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, dmg: 0, life: st.range / sp, from: 'o', flame: !!st.flame, explode: st.explode || 0, key: o.k });
+  }
+  if (visibleAt(m, o.x, o.y)) SFX.play(o.k, o.k === 'flamer' ? 90 : o.k === 'smg' ? 40 : 0);
+}
+function tookMed(m, o) {
+  const p = m.pickups.find(q => q.id === o.id); if (!p) return;
+  m.pickups.splice(m.pickups.indexOf(p), 1);
+  if (o.by === m.you) { const pl = m.player, h = pl.ps.maxHp * 0.35; pl.hp = Math.min(pl.ps.maxHp, pl.hp + h); addFloat(m, pl.x, pl.y - 12, '+' + Math.round(h), '#7bd34f'); SFX.play('pickup'); }
+  setTimeout(() => { if (m === PVP.m && m.round === o.round) m.pickups.push(Object.assign({}, p, { pending: false })); }, 15000);
+}
+function newRound(m, round) {
+  m.round = round; m.phase = 'count'; m.phaseT = 3; m.roundT = PVP_ROUND_TIME; m.timeoutSent = false;
+  m.tiles.set(m.baseTiles); m.crateHp.fill(40);
+  const me = m.arena.spawns[(m.you + round + 1) % 2], them = m.arena.spawns[(m.you + round) % 2];
+  const p = m.player; Object.assign(p, { x: me.x, y: me.y, hp: p.ps.maxHp, ang: me.x < them.x ? 0 : Math.PI, cur: 0, fireT: 0.5, hurtT: 0 });
+  p.weapons.forEach(w => { w.ammo = w.st.mag; w.reloadT = 0; });
+  Object.assign(m.opp, { x: them.x, y: them.y, hp: m.opp.maxHp, ang: me.x < them.x ? Math.PI : 0 }); m.snaps = [];
+  m.bullets = []; m.beams = []; m.parts = [];
+  m.pickups = m.arena.meds.map((q, i) => ({ id: 'm' + i, type: 'med', x: q.x, y: q.y, bob: i, round }));
+  m.state = 'play'; m.explored.fill(0); updateVis(m, true);
+  m.banner = { text: `ROUND ${round}`, sub: `${m.score[m.you]} : ${m.score[1 - m.you]}`, t: 3 };
+}
+function roundOver(m, o) {
+  m.score = o.score; m.phase = 'over';
+  const meWon = o.winner === m.you;
+  m.banner = { text: o.winner === null ? '무승부' : meWon ? '라운드 승리!' : '라운드 패배', sub: `${m.score[m.you]} : ${m.score[1 - m.you]}`, t: 3, col: meWon ? '#ffd34a' : '#ff6b5b' };
+  SFX.play(meWon ? 'exit' : 'die');
+}
+
+// ---------------- per-frame update ----------------
+function updatePvp(m, dt, inp) {
+  m.time += dt;
+  const p = m.player;
+  if (m.banner) { m.banner.t -= dt; if (m.banner.t <= 0) m.banner = null; }
+  // opponent: interpolate received snapshots
+  const rt = performance.now() - PVP_INTERP_MS, sn = m.snaps;
+  if (sn.length) {
+    let a = sn[0], b = sn[sn.length - 1];
+    for (let i = 0; i < sn.length - 1; i++) if (sn[i].t <= rt && sn[i + 1].t >= rt) { a = sn[i]; b = sn[i + 1]; break; }
+    const k = b.t > a.t ? Math.max(0, Math.min(1, (rt - a.t) / (b.t - a.t))) : 1;
+    const o = m.opp; o.x = a.x + (b.x - a.x) * k; o.y = a.y + (b.y - a.y) * k;
+    let da = b.a - a.a; while (da > Math.PI) da -= Math.PI * 2; while (da < -Math.PI) da += Math.PI * 2;
+    o.ang = a.a + da * k; o.hp = b.hp; o.maxHp = b.mh || o.maxHp;
+    const w = (o.card.weapons.find(q => q.key === b.w) || o.card.weapons[0] || {});
+    if (w.paint && o.d.look.V !== w.paint) o.d.look = Object.assign({}, o.d.look, { V: w.paint });
+  }
+  m.opp.flash -= dt;
+  if (m.phase === 'count') { m.phaseT -= dt; if (m.phaseT <= 0) { m.phase = 'fight'; SFX.play('alert'); m.banner = { text: 'FIGHT!', t: 0.8, col: '#ffd34a' }; } }
+  const canAct = m.phase === 'fight';
+  if (canAct) {
+    let mx = inp.mx, my = inp.my; const ml = Math.hypot(mx, my);
+    if (ml > 1) { mx /= ml; my /= ml; }
+    if (ml > 0.1) { moveCircle(m, p, mx * p.ps.speed * dt, my * p.ps.speed * dt); p.step += dt * ml * 10; }
+    let firing = false;
+    if (inp.aiming) {
+      let a = inp.aimAng;
+      const o = m.opp;
+      if (inp.assist && visibleAt(m, o.x, o.y)) { const oa = Math.atan2(o.y - p.y, o.x - p.x); const da = Math.abs(((oa - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI); if (da < 0.22 && Math.hypot(o.x - p.x, o.y - p.y) < 230) a = oa; }
+      p.ang = a; firing = inp.fire;
+    } else if (ml > 0.1) p.ang = Math.atan2(my, mx);
+    if (inp.autoFire > 0) { const o = m.opp; if (visibleAt(m, o.x, o.y) && losClear(m, p.x, p.y, o.x, o.y) && Math.hypot(o.x - p.x, o.y - p.y) < 230) { p.ang = Math.atan2(o.y - p.y, o.x - p.x); firing = true; } }
+    p.fireT -= dt;
+    const w = curWeapon(m);
+    if (w && w.reloadT > 0) { w.reloadT -= dt; if (w.reloadT <= 0) { w.reloadT = 0; w.ammo = w.st.mag; } }
+    if (firing) fire(m, p.ang);
+    if (p.ps.regen > 0 && p.hp > 0 && p.hp < p.ps.maxHp) p.hp = Math.min(p.ps.maxHp, p.hp + p.ps.regen * dt);
+    // pickups are granted by the server (first claim wins)
+    m.pickups.forEach(o => { o.bob += dt; if (!o.pending && p.hp < p.ps.maxHp && Math.hypot(o.x - p.x, o.y - p.y) < 11) { o.pending = true; Net.send({ t: 'claim', id: o.id, round: m.round }); } });
+    m.roundT -= dt;
+    if (m.roundT <= 0 && !m.timeoutSent) { m.timeoutSent = true; m.phase = 'wait'; Net.send({ t: 'timeout', round: m.round, hp: p.hp / p.ps.maxHp }); }
+  }
+  p.hurtT -= dt;
+  m.visT -= dt; if (m.visT <= 0) { m.visT = 0.1; updateVis(m); }
+  updateBullets(m, dt);
+  updateParticles(m, dt);
+  // send my state
+  m.sendT -= dt;
+  if (m.sendT <= 0) { m.sendT = 1 / PVP_SEND_HZ; const w = curWeapon(m); Net.send({ t: 's', x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10, a: +p.ang.toFixed(3), hp: Math.round(p.hp), mh: p.ps.maxHp, w: w ? w.key : '' }); }
+}
+function renderPvpOverlay(ctx, m) {
+  if (!m.banner) return;
+  const b = m.banner, a = Math.min(1, b.t * 2);
+  ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(0, VH / 2 - 30, VW, b.sub ? 56 : 40);
+  ctx.font = 'bold 24px sans-serif'; ctx.fillStyle = '#000'; ctx.fillText(b.text, VW / 2 + 1, VH / 2 - 2);
+  ctx.fillStyle = b.col || '#ffffff'; ctx.fillText(b.text, VW / 2, VH / 2 - 3);
+  if (m.phase === 'count' && m.phaseT > 0) { ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = '#cfd6ea'; ctx.fillText(Math.ceil(m.phaseT) + '초 후 시작', VW / 2, VH / 2 + 18); }
+  else if (b.sub) { ctx.font = 'bold 13px sans-serif'; ctx.fillStyle = '#cfd6ea'; ctx.fillText('나 ' + b.sub + ' 상대', VW / 2, VH / 2 + 18); }
+  ctx.restore();
 }
 
 // ===================================================================
@@ -2001,8 +2280,8 @@ const UI = {
   openPanel(name, sub) {
     this.panel = name; this.sub = sub || {};
     $('modal').classList.remove('hidden');
-    $('modal').classList.toggle('center', name === 'result' || name === 'pause' || name === 'confirmNew');
-    $('mClose').classList.toggle('hidden', name === 'result' || name === 'pause');
+    $('modal').classList.toggle('center', name === 'result' || name === 'pause' || name === 'confirmNew' || name === 'pvpQuit' || name === 'pvpResult');
+    $('mClose').classList.toggle('hidden', name === 'result' || name === 'pause' || name === 'pvpResult');
     this.render();
     SFX.play('click');
   },
@@ -2290,15 +2569,71 @@ const UI = {
   a_closeM() { this.closeModal(); },
   a_doNew() { this.closeModal(); newGame(); },
 
+  // ---------------- PVP lobby ----------------
+  p_pvp() {
+    const c = myCard(), ps = statsFromCard(c), rec = S.pvp;
+    const url = S.settings.server || Net.defaultUrl();
+    let h = `<div class="row"><img src="${this.heroURL()}" width="56" height="56"><div class="grow">
+      <div class="t">내 전투 카드 · Lv ${c.lvl}</div>
+      <div class="s">체력 ${ps.maxHp} · 방어 ${ps.armor} · 피해 ${Math.round(ps.dmgMul * 100)}% · 무기 ${c.weapons.map(w => WEAPONS[w.key].name + ' +' + w.lvl).join(', ')} · 장비 ${c.gear.length}개</div>
+      <div class="s">전적 <b style="color:var(--good)">${rec.w}승</b> <b style="color:var(--bad)">${rec.l}패</b> · 레이팅 <b style="color:var(--acc)">${rec.rating}</b></div></div></div>
+      <div class="row" style="flex-wrap:wrap"><span>이름</span><input type="text" id="pvpName" maxlength="12" value="${(S.name || '').replace(/"/g, '')}" placeholder="독스" style="flex:1">
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pvpFair" ${S.settings.fair ? 'checked' : ''}> 레벨 보정</label></div>
+      <div class="s" style="margin:-2px 0 8px">레벨 보정: 두 캐릭터를 높은 쪽 레벨 기준으로 맞춰서 능력치 배분·장비 등급·조작으로 승부 (무기 강화 단계는 그대로)</div>
+      <div class="row" style="flex-wrap:wrap"><span>서버</span><input type="text" id="pvpServer" value="${url}" placeholder="wss://내서버주소/ws" style="flex:1"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="go" data-a="pvpGo" data-k="quick">빠른 대전</button>
+        <button data-a="pvpGo" data-k="create">방 만들기</button>
+        <input type="text" id="pvpCode" inputmode="numeric" maxlength="4" placeholder="방 코드" style="width:90px">
+        <button data-a="pvpGo" data-k="join">참가</button>
+      </div>
+      <div id="pvpStatus">${this._pvpStatus || '<span class="s">3판 2선승 · 라운드 90초 · 승리 ◈' + (150 + S.lvl * 15) + ' / 패배 ◈40 · 레이팅 변동</span>'}</div>`;
+    return ['⚔ 실시간 대전', h];
+  },
+  pvpStatus(html, waiting) {
+    this._pvpStatus = html ? html + (waiting ? ' <button class="small" data-a="pvpCancel" style="margin-left:8px">취소</button>' : '') : '';
+    const el = $('pvpStatus'); if (el) el.innerHTML = this._pvpStatus || '';
+  },
+  a_pvpGo(d) {
+    S.name = ($('pvpName').value || '').trim().slice(0, 12); S.settings.fair = $('pvpFair').checked;
+    S.settings.server = ($('pvpServer').value || '').trim(); saveGame();
+    if (d.k === 'join' && !/^\d{4}$/.test(($('pvpCode').value || '').trim())) { this.pvpStatus('4자리 방 코드를 입력하세요'); return; }
+    SFX.init(); PVP.go(d.k, $('pvpCode').value);
+  },
+  a_pvpCancel() { PVP.cancel(); },
+  p_pvpQuit() {
+    return ['항복', `<div style="margin-bottom:14px">지금 나가면 이번 대전은 패배로 기록됩니다.</div>
+      <div style="display:flex;gap:10px;justify-content:center"><button class="go" data-a="closeM">계속 싸우기</button><button data-a="pvpSurrender" style="border-color:var(--bad);color:var(--bad)">항복하고 나가기</button></div>`];
+  },
+  a_pvpSurrender() { this.closeModal(); const m = PVP.m; Net.send({ t: 'cancel' }); PVP.endMatch({ winner: m ? 1 - m.you : null, reason: 'surrender' }); },
+  p_pvpResult() {
+    const r = this.sub, s = r.score;
+    const title = r.reason === 'net' ? '연결 끊김' : r.draw ? '무승부' : r.win ? '승리!' : '패배';
+    let h = `<div class="big2 ${r.win ? 'win' : 'lose'}">${title}</div>
+      <div class="stat"><span>상대</span><b>${r.opp}</b></div>
+      <div class="stat"><span>라운드</span><b>${s[r.you]} : ${s[1 - r.you]}</b></div>
+      ${r.reason === 'left' ? '<div class="s">상대가 대전을 떠나 승리 처리되었습니다.</div>' : ''}${r.reason === 'surrender' ? '<div class="s">항복했습니다.</div>' : ''}${r.reason === 'net' ? '<div class="s">서버 연결이 끊어져 결과가 기록되지 않았습니다.</div>' : ''}
+      <div class="stat"><span>레이팅</span><b>${S.pvp.rating} <span class="${r.dr >= 0 ? 'up' : 'down'}">(${r.dr >= 0 ? '+' : ''}${r.dr})</span></b></div>
+      <div class="stat"><span>보상</span><b style="color:var(--acc)">◈${fmt(r.cr)}</b></div>
+      <div class="stat"><span>전적</span><b>${S.pvp.w}승 ${S.pvp.l}패</b></div>
+      <div style="text-align:center;margin-top:14px"><button class="go big" data-a="pvpDone">기지로 귀환</button></div>`;
+    return ['대전 결과', h];
+  },
+  a_pvpDone() { this.closeModal(); Game.toHub(); },
+
   // ---------------- HUD ----------------
   updateHud(m) {
     const p = m.player, w = curWeapon(m);
     $('uHp').style.width = (p.hp / p.ps.maxHp * 100) + '%';
     $('uHpT').textContent = `${Math.ceil(p.hp)} / ${p.ps.maxHp}`;
     $('uCr').textContent = fmt(m.gained.cr);
-    const goals = m.goals.map(g => `<span class="${g.got >= g.need ? 'ok' : ''}">◆ ${OBJ_TYPES[g.type].name} ${g.got}/${g.need}</span>`).join(' &nbsp; ');
+    if (m.pvp) {
+      const gh = `<span style="color:#ffd34a">⚔ 나 ${m.score[m.you]} : ${m.score[1 - m.you]} ${m.opp.d.name}</span> &nbsp; R${m.round} &nbsp; ${Math.max(0, Math.ceil(m.roundT))}초 &nbsp; <span class="s">${Net.ping}ms</span>`;
+      if ($('uGoals')._h !== gh) { $('uGoals').innerHTML = gh; $('uGoals')._h = gh; }
+    }
+    const goals = m.pvp ? '' : m.goals.map(g => `<span class="${g.got >= g.need ? 'ok' : ''}">◆ ${OBJ_TYPES[g.type].name} ${g.got}/${g.need}</span>`).join(' &nbsp; ');
     const gh = goals + (m.exit.active ? ' &nbsp; <span class="exit">▶ 출구로!</span>' : '');
-    if ($('uGoals')._h !== gh) { $('uGoals').innerHTML = gh; $('uGoals')._h = gh; }
+    if (!m.pvp && $('uGoals')._h !== gh) { $('uGoals').innerHTML = gh; $('uGoals')._h = gh; }
     if (w) {
       const src = this.icon('weapon', w.key, w.paint);
       if ($('uWImg')._s !== src) { $('uWImg').src = src; $('uWImg')._s = src; $('uWName').textContent = WEAPONS[w.key].name + (p.weapons.length > 1 ? ' ⇄' : ''); }
@@ -2339,7 +2674,7 @@ const Game = {
     SFX.init(); startMission(def); this.mode = 'mission'; this.paused = false;
     resetInput(); UI.show('hud'); UI.toast(`${def.name} — ${def.goals.map(g => OBJ_TYPES[g.type].text(g.need)).join(', ')}`, 3500);
   },
-  toHub() { this.mode = 'hub'; M = null; RE.hero = null; UI.show('hub'); },
+  toHub() { this.mode = 'hub'; M = null; PVP.m = null; RE.hero = null; UI.show('hub'); },
 };
 
 // ---------------- input state ----------------
@@ -2356,6 +2691,11 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyQ' || e.code === 'Digit1' || e.code === 'Digit2') swapWeapon(M);
     if (e.code === 'KeyM' || e.code === 'Tab') { Game.mapHeld = true; e.preventDefault(); }
     if (e.code === 'Escape') { Game.paused = true; UI.openPanel('pause'); }
+  }
+  if (Game.mode === 'pvp' && M) {
+    if (e.code === 'KeyR') reload(M);
+    if (e.code === 'KeyQ' || e.code === 'Digit1' || e.code === 'Digit2') swapWeapon(M);
+    if (e.code === 'KeyM' || e.code === 'Tab') { Game.mapHeld = true; e.preventDefault(); }
   }
 });
 addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'KeyM' || e.code === 'Tab') Game.mapHeld = false; });
@@ -2392,8 +2732,8 @@ touch.addEventListener('contextmenu', e => e.preventDefault());
 
 $('bMap').addEventListener('pointerdown', e => { Game.mapHeld = true; e.stopPropagation(); });
 ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => $('bMap').addEventListener(ev, () => Game.mapHeld = false));
-$('bPause').addEventListener('click', () => { Game.paused = true; UI.openPanel('pause'); });
-$('uWeapon').addEventListener('click', () => M && swapWeapon(M));
+$('bPause').addEventListener('click', () => { if (Game.mode === 'pvp') { UI.openPanel('pvpQuit'); return; } Game.paused = true; UI.openPanel('pause'); });
+$('uWeapon').addEventListener('click', () => M && swapWeapon(M));  // works in PVP too
 $('bReload').addEventListener('click', () => M && reload(M));
 
 function readInput(dt) {
@@ -2444,7 +2784,7 @@ $('bSettings').addEventListener('click', () => UI.openPanel('settings'));
 $('bEdit').addEventListener('click', () => UI.enterEdit());
 $('bEditDone').addEventListener('click', () => UI.exitEdit());
 $('mClose').addEventListener('click', () => UI.closeModal());
-$('modal').addEventListener('click', e => { if (e.target === $('modal') && !['result', 'pause'].includes(UI.panel)) UI.closeModal(); });
+$('modal').addEventListener('click', e => { if (e.target === $('modal') && !['result', 'pause', 'pvpResult'].includes(UI.panel)) UI.closeModal(); });
 $('bSelMove').addEventListener('click', () => { RE.moving = !RE.moving; RE.placeId = null; UI.refreshEdit(); });
 $('bSelStore').addEventListener('click', () => {
   const o = S.room.items.find(q => q.uid === RE.sel); if (!o) return;
@@ -2460,6 +2800,7 @@ document.addEventListener('visibilitychange', () => {
 window.__esc = () => { // Android back button
   if (!$('modal').classList.contains('hidden')) { if (UI.panel === 'pause') UI.a_resume(); else if (UI.panel !== 'result') UI.closeModal(); return; }
   if (Game.mode === 'mission') { Game.paused = true; UI.openPanel('pause'); return; }
+  if (Game.mode === 'pvp') { UI.openPanel('pvpQuit'); return; }
   if (UI.screen === 'edit') { UI.exitEdit(); return; }
 };
 
@@ -2477,6 +2818,14 @@ function frame(now) {
       if (Game.mapHeld) renderMinimap(ctx, M, clock);
       UI.updateHud(M);
     }
+  } else if (Game.mode === 'pvp' && M) {
+    readInput(dt);
+    updatePvp(M, dt, inp);
+    renderMission(ctx, M, clock);
+    renderPvpOverlay(ctx, M);
+    M.cam = { x: Math.round(M.player.x) - (VW >> 1), y: Math.round(M.player.y) - (VH >> 1) };
+    if (Game.mapHeld) renderMinimap(ctx, M, clock);
+    UI.updateHud(M);
   } else if (S) {
     updateRoom(dt); renderRoom(ctx, clock);
   } else {
