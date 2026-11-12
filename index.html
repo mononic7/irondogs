@@ -3021,6 +3021,22 @@ function renderFlares(ctx, m, t) {
     ctx.fillStyle = '#fff2d8'; ctx.beginPath(); ctx.arc(f.x + 2.5, f.y, 1.4 * fl, 0, 6.2832); ctx.fill();
   });
 }
+// rain streaks (shared by the top-down and the first-person view). Every drop has its own speed, length and brightness and
+// takes a new random column each time it comes back in at the top, so no rows or diagonals form.
+//   ox, oy = world offset (top-down: the player position, so the rain stays put over the ground), fast = speed factor, slant = sideways drift per unit of fall
+function rainStreaks(ctx, t, ox, oy, n, fast, slant) {
+  const W = VW + 60, H = VH + 40;
+  for (let b = 0; b < 3; b++) {   // three layers: far (faint, short, slow) to near (bright, long, fast)
+    ctx.strokeStyle = `rgba(175,198,236,${[0.2, 0.34, 0.5][b]})`; ctx.lineWidth = [0.45, 0.6, 0.85][b]; ctx.beginPath();
+    for (let i = b; i < n; i += 3) {
+      const sp = (200 + 170 * noiseAt(i, 3, 7) + b * 55) * fast, len = (3.5 + 5 * noiseAt(i, 4, 7) + b * 2.5) * (0.7 + 0.3 * fast);
+      const yy = noiseAt(i, 2, 7) * H + t * sp - oy, cyc = Math.floor(yy / H), fall = yy - cyc * H;
+      const sx = (((noiseAt(i, cyc & 1023, 11) * W - fall * slant - ox) % W) + W) % W - 30, sy = fall - 20;
+      ctx.moveTo(sx, sy); ctx.lineTo(sx - len * slant, sy + len);
+    }
+    ctx.stroke();
+  }
+}
 // screen-space overlays: night darkness with the flashlight cone, rain streaks, fog haze
 function renderAtmos(ctx, m, t) {
   const p = m.player, cx = VW / 2, cy = VH / 2;
@@ -3051,12 +3067,7 @@ function renderAtmos(ctx, m, t) {
   }
   if (m.weather === 'rain') {
     ctx.fillStyle = 'rgba(30,45,80,0.14)'; ctx.fillRect(0, 0, VW, VH);
-    ctx.strokeStyle = 'rgba(170,195,235,0.38)'; ctx.lineWidth = 0.6; ctx.beginPath();
-    for (let i = 0; i < 90; i++) {
-      const sx = ((i * 97.31 + t * 40 - p.x) % (VW + 40) + VW + 40) % (VW + 40) - 20, sy = ((i * 53.77 + t * 300 - p.y) % (VH + 20) + VH + 20) % (VH + 20) - 10;
-      ctx.moveTo(sx, sy); ctx.lineTo(sx - 2.5, sy + 8);
-    }
-    ctx.stroke();
+    rainStreaks(ctx, t, p.x, p.y, 120, 1, 0.3);
     for (let i = 0; i < 14; i++) { const k = (t * 2.3 + i * 0.37) % 1, sx = (i * 131.7 + Math.floor(t * 2.3 + i * 0.37) * 71) % VW, sy = (i * 71.3 + Math.floor(t * 2.3 + i * 0.37) * 37) % VH; ctx.strokeStyle = `rgba(190,210,240,${0.4 * (1 - k)})`; ctx.beginPath(); ctx.ellipse(sx, sy, 1 + k * 3, (1 + k * 3) * 0.45, 0, 0, 6.2832); ctx.stroke(); }
   } else if (m.weather === 'fog') {
     const g = ctx.createRadialGradient(cx, cy, 30, cx, cy, VW * 0.55);
@@ -4048,9 +4059,10 @@ const UI = {
 
   // ---------------- settings ----------------
   p_settings() {
-    const v2 = S.settings.view === '2d', sn = S.settings.sens || 1;
+    const v2 = S.settings.view === '2d', sn = S.settings.sens || 1, gq = f3Gfx();
     const h = `<div class="row"><div class="grow"><div class="t">효과음</div></div><button data-a="snd">${S.settings.sound ? '켜짐' : '꺼짐'}</button></div>
       <div class="row"><div class="grow"><div class="t">임무 화면</div><div style="font-size:11px;color:var(--dim)">${F3.ok === false ? '이 기기는 3D를 쓸 수 없어 탑다운으로 진행합니다' : '1인칭 3D: 보는 방향으로 걷고 조준 · 탑다운 2D: 위에서 내려다보는 예전 화면'}</div></div><button data-a="view">${v2 ? '탑다운 2D' : '1인칭 3D'}</button></div>
+      <div class="row"><div class="grow"><div class="t">화질 (1인칭)</div><div style="font-size:11px;color:var(--dim)">높음: 선명한 해상도 + 매끈한 모서리 · 느리면 보통이나 낮음으로</div></div><button data-a="gfx">${gq === F3_GFX.low ? '낮음' : gq === F3_GFX.mid ? '보통' : '높음'}</button></div>
       <div class="row"><div class="grow"><div class="t">둘러보기 감도 (1인칭)</div></div><button data-a="sens">${sn < 0.9 ? '느리게' : sn > 1.1 ? '빠르게' : '보통'}</button></div>
       <h3>백업 (앱을 지우면 저장이 사라집니다)</h3>
       <button data-a="export">백업 코드 만들기</button> <button data-a="import">코드로 복원</button>
@@ -4061,6 +4073,7 @@ const UI = {
   a_snd() { S.settings.sound = !S.settings.sound; saveGame(); this.render(); },
   // mission view: first-person 3D (default) or the classic top-down 2D. Also on the pause panel: it can be switched in the middle of a mission.
   a_view() { S.settings.view = S.settings.view === '2d' ? '3d' : '2d'; saveGame(); resetInput(); this.render(); },
+  a_gfx() { const q = f3Gfx(); S.settings.gfx = q === F3_GFX.low ? 'mid' : q === F3_GFX.mid ? 'high' : 'low'; saveGame(); this.render(); },
   a_sens() { const sn = S.settings.sens || 1; S.settings.sens = sn < 0.9 ? 1 : sn > 1.1 ? 0.6 : 1.5; saveGame(); this.render(); },
   a_export() { this.sub.code = exportCode(); this.render(); const b = $('codeBox'); b.select(); try { navigator.clipboard.writeText(this.sub.code).then(() => this.toast('백업 코드를 복사했습니다'), () => this.toast('자동 복사가 안 됩니다 — 위 코드를 길게 눌러 복사하세요')); } catch (e) { } },
   a_import() { try { importCode($('codeBox').value); RE.hero = null; this.toast('복원 완료'); this.closeModal(); this.refreshHub(); } catch (e) { this.toast('코드가 올바르지 않습니다'); } },
@@ -4187,7 +4200,7 @@ const F3 = {
   target: null,        // enemy under the crosshair
   m: null,
 };
-const F3_GLOW_MAX = 2200, F3_SMOKE_MAX = 500;
+const F3_GLOW_MAX = 2200, F3_SMOKE_MAX = 500, F3_SHADOW_MAX = 300;
 // first-person weapon shapes: bw / tw = half width at the bottom / at the muzzle, ty = muzzle height above the screen bottom,
 // kick = how far it jumps when fired (the weapon only - the camera never moves), fl = muzzle flash size
 const F3_GUN = {
@@ -4204,7 +4217,7 @@ function f3Init() {
   try {
     if (typeof THREE === 'undefined') throw new Error('three.js missing');
     F3.cv = $('cv3');
-    F3.r = new THREE.WebGLRenderer({ canvas: F3.cv, antialias: false, powerPreference: 'high-performance' });
+    f3MakeRenderer();
     F3.cam = new THREE.PerspectiveCamera(F3.fov, VW / VH, 0.5, 700);
     F3.v = new THREE.Vector3();
     F3.texOf = new Map();
@@ -4213,6 +4226,20 @@ function f3Init() {
   return F3.ok;
 }
 // first person is used on every mission unless the player picked the top-down view in the settings (S.settings.view === '2d')
+// picture quality (S.settings.gfx; default: high with a mouse, mid on touch devices)
+//   px  = most device pixels drawn per CSS pixel, w = widest drawing buffer, aa = smooth edges (MSAA), ui = most overlay pixels per game unit
+const F3_GFX = { low: { px: 1, w: 1280, aa: false, ui: 2 }, mid: { px: 2, w: 2000, aa: false, ui: 4 }, high: { px: 3, w: 3200, aa: true, ui: 6 } };
+function f3Gfx() { return F3_GFX[S && S.settings && S.settings.gfx] || (F3.touch ? F3_GFX.mid : F3_GFX.high); }
+// edge smoothing is fixed when a WebGL canvas is created, so changing it means a new canvas + renderer (the scene is rebuilt on the next frame)
+function f3MakeRenderer() {
+  const aa = f3Gfx().aa;
+  if (F3.r) {
+    F3.r.dispose(); try { F3.r.forceContextLoss(); } catch (e) { }
+    const n = document.createElement('canvas'); n.id = 'cv3'; n.style.cssText = F3.cv.style.cssText; F3.cv.replaceWith(n); F3.cv = n;
+  }
+  F3.r = new THREE.WebGLRenderer({ canvas: F3.cv, antialias: aa, powerPreference: 'high-performance' });
+  F3.aa = aa; F3.w = 0; F3.m = null;
+}
 function f3Active(m) { return !!(F3.on && m && !(S && S.settings && S.settings.view === '2d') && f3Init()); }
 
 // ---------- textures ----------
@@ -4332,7 +4359,8 @@ function f3Quad(g, a, b, c, d, k, su, sv) {
   su = su || 1; sv = sv || 1;
   g.p.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2]);
   g.u.push(0, 0, su, 0, su, sv, 0, 0, su, sv, 0, sv);
-  for (let i = 0; i < 6; i++) g.c.push(k, k, k);
+  // k: one shade for the whole quad, or [a, b, c, d] per corner (soft shading: darker near the floor and in corners)
+  if (k.length) for (const i of [0, 1, 2, 0, 2, 3]) g.c.push(k[i], k[i], k[i]); else for (let i = 0; i < 6; i++) g.c.push(k, k, k);
 }
 function f3Mesh(g, map, extra) {
   const geo = new THREE.BufferGeometry();
@@ -4345,10 +4373,11 @@ function f3Mesh(g, map, extra) {
 }
 // 4 sides (+ top) of a box standing on the floor
 function f3Box(g, x0, z0, x1, z1, h, top) {
-  f3Quad(g, [x0, 0, z0], [x1, 0, z0], [x1, h, z0], [x0, h, z0], 1);       // north
-  f3Quad(g, [x1, 0, z1], [x0, 0, z1], [x0, h, z1], [x1, h, z1], 1);       // south
-  f3Quad(g, [x0, 0, z1], [x0, 0, z0], [x0, h, z0], [x0, h, z1], 0.78);    // west
-  f3Quad(g, [x1, 0, z0], [x1, 0, z1], [x1, h, z1], [x1, h, z0], 0.78);    // east
+  const A = [0.7, 0.7, 1, 1], B = [0.55, 0.55, 0.78, 0.78];               // darker toward the floor
+  f3Quad(g, [x0, 0, z0], [x1, 0, z0], [x1, h, z0], [x0, h, z0], A);       // north
+  f3Quad(g, [x1, 0, z1], [x0, 0, z1], [x0, h, z1], [x1, h, z1], A);       // south
+  f3Quad(g, [x0, 0, z1], [x0, 0, z0], [x0, h, z0], [x0, h, z1], B);       // west
+  f3Quad(g, [x1, 0, z0], [x1, 0, z1], [x1, h, z1], [x1, h, z0], B);       // east
   if (top) f3Quad(g, [x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], 1.12);
 }
 function f3BuildWalls(m) {
@@ -4360,10 +4389,12 @@ function f3BuildWalls(m) {
     if (!solid(i, j)) continue;
     const x0 = i * T, x1 = x0 + T, z0 = j * T, z1 = z0 + T;
     if (fld) f3Quad(g, [x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], 0.55);   // top (seen from the helicopter)
-    if (open(i, j - 1)) f3Quad(g, [x1, 0, z0], [x0, 0, z0], [x0, h, z0], [x1, h, z0], 1);
-    if (open(i, j + 1)) f3Quad(g, [x0, 0, z1], [x1, 0, z1], [x1, h, z1], [x0, h, z1], 1);
-    if (open(i - 1, j)) f3Quad(g, [x0, 0, z0], [x0, 0, z1], [x0, h, z1], [x0, h, z0], 0.76);
-    if (open(i + 1, j)) f3Quad(g, [x1, 0, z1], [x1, 0, z0], [x1, h, z0], [x1, h, z1], 0.76);
+    // soft shading: darker near the floor and where the wall meets another wall (ad / bc = is that end an inner corner?)
+    const face = (a, b, c, d, k, ad, bc) => f3Quad(g, a, b, c, d, [k * 0.78 * (ad ? 0.6 : 1), k * 0.78 * (bc ? 0.6 : 1), k * 0.96 * (bc ? 0.6 : 1), k * 0.96 * (ad ? 0.6 : 1)]);
+    if (open(i, j - 1)) face([x1, 0, z0], [x0, 0, z0], [x0, h, z0], [x1, h, z0], 1, !open(i + 1, j - 1), !open(i - 1, j - 1));
+    if (open(i, j + 1)) face([x0, 0, z1], [x1, 0, z1], [x1, h, z1], [x0, h, z1], 1, !open(i - 1, j + 1), !open(i + 1, j + 1));
+    if (open(i - 1, j)) face([x0, 0, z0], [x0, 0, z1], [x0, h, z1], [x0, h, z0], 0.76, !open(i - 1, j - 1), !open(i - 1, j + 1));
+    if (open(i + 1, j)) face([x1, 0, z1], [x1, 0, z0], [x1, h, z0], [x1, h, z1], 0.76, !open(i + 1, j + 1), !open(i + 1, j - 1));
   }
   if (F3.walls) { F3.scene.remove(F3.walls); F3.walls.geometry.dispose(); F3.walls.material.dispose(); }
   F3.walls = f3Mesh(g, f3Tex(F3.wallC, true));
@@ -4406,7 +4437,7 @@ function f3RockCanvas() {
 }
 // two crossed upright quads: a cheap tree / rock that looks solid from every side (one draw call for the whole forest)
 function f3Cross(g, cx, cz, w, h, rot, k) {
-  for (const a of [rot, rot + Math.PI / 2]) { const dx = Math.cos(a) * w, dz = Math.sin(a) * w; f3Quad(g, [cx - dx, 0, cz - dz], [cx + dx, 0, cz + dz], [cx + dx, h, cz + dz], [cx - dx, h, cz - dz], k); }
+  for (const a of [rot, rot + Math.PI / 2]) { const dx = Math.cos(a) * w, dz = Math.sin(a) * w; f3Quad(g, [cx - dx, 0, cz - dz], [cx + dx, 0, cz + dz], [cx + dx, h, cz + dz], [cx - dx, h, cz - dz], [k * 0.7, k * 0.7, k, k]); }
 }
 function f3BuildField(m) {
   const { W, H, tiles, deco } = m, trees = f3Geo(), rocks = f3Geo(), sc = F3.scene;
@@ -4465,6 +4496,10 @@ function f3Build(m) {
   F3.floorTex.magFilter = THREE.NearestFilter; F3.floorTex.minFilter = THREE.LinearMipmapLinearFilter; F3.floorTex.anisotropy = Math.min(8, F3.r.capabilities.getMaxAnisotropy());
   let g = f3Geo(); f3Quad(g, [0, 0, Ht], [Wt, 0, Ht], [Wt, 0, 0], [0, 0, 0], 1);
   sc.add(f3Mesh(g, F3.floorTex));
+  // soft round shadows under characters and items: one instanced mesh lying on the floor
+  if (!F3.shadowC) { const c = F3.shadowC = mkCanvas(64, 64), x = c.getContext('2d'), gr = x.createRadialGradient(32, 32, 2, 32, 32, 32); gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(0.6, 'rgba(0,0,0,0.3)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = gr; x.fillRect(0, 0, 64, 64); }
+  F3.shadow = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(F3.shadowC), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }), F3_SHADOW_MAX);
+  F3.shadow.frustumCulled = false; F3.shadow.count = 0; sc.add(F3.shadow);
   if (!fld) {   // ceiling
     const ct = new THREE.CanvasTexture(f3CeilCanvas(th)); ct.wrapS = ct.wrapT = THREE.RepeatWrapping; ct.magFilter = THREE.NearestFilter;
     g = f3Geo(); f3Quad(g, [0, F3.wallH, Ht], [Wt, F3.wallH, Ht], [Wt, F3.wallH, 0], [0, F3.wallH, 0], 1, m.W, m.H);
@@ -4532,6 +4567,12 @@ function f3FlushPts(o, k) {
   g.attributes.position.needsUpdate = g.attributes.size.needsUpdate = g.attributes.col.needsUpdate = true;
   o.obj.material.uniforms.k.value = k;
 }
+function f3Shade(x, y, d) {
+  const n = F3.shN; if (n >= F3_SHADOW_MAX) return;
+  const a = F3.shadow.instanceMatrix.array, o = n * 16;
+  a[o] = d; a[o + 1] = 0; a[o + 2] = 0; a[o + 3] = 0; a[o + 4] = 0; a[o + 5] = 1; a[o + 6] = 0; a[o + 7] = 0; a[o + 8] = 0; a[o + 9] = 0; a[o + 10] = d; a[o + 11] = 0; a[o + 12] = x; a[o + 13] = 0.07; a[o + 14] = y; a[o + 15] = 1;
+  F3.shN = n + 1;
+}
 function f3Sprite(c, x, h, y, scale, tint) {
   let s = F3.pool[F3.sn];
   if (!s) { s = new THREE.Sprite(new THREE.SpriteMaterial({ map: f3Tex(c), alphaTest: 0.5, fog: true })); s.center.set(0.5, 0); F3.pool.push(s); F3.scene.add(s); }
@@ -4551,16 +4592,24 @@ function f3Project(x, h, y) {
 function f3Resize() {
   const w = cv.clientWidth, h = cv.clientHeight; if (!w || !h) return;
   const st = F3.cv.style;
-  if (F3.w === w && F3.h === h && st.left === cv.style.left && st.top === cv.style.top) return;
-  F3.w = w; F3.h = h; st.left = cv.style.left; st.top = cv.style.top; st.width = w + 'px'; st.height = h + 'px';
-  const pr = Math.min(window.devicePixelRatio || 1, 2, 1600 / w);
+  const q = f3Gfx(), dpr = window.devicePixelRatio || 1;
+  if (F3.w === w && F3.h === h && F3.q === q && F3.dpr === dpr && st.left === cv.style.left && st.top === cv.style.top) return;
+  F3.w = w; F3.h = h; F3.q = q; F3.dpr = dpr; st.left = cv.style.left; st.top = cv.style.top; st.width = w + 'px'; st.height = h + 'px';
+  const pr = Math.min(dpr, q.px, q.w / w);
   F3.r.setPixelRatio(pr); F3.r.setSize(w, h, false);
   F3.cam.aspect = w / h; F3.cam.updateProjectionMatrix();
+  // the 2D overlay (weapon, crosshair, map, numbers) is drawn at about the real screen resolution instead of 800x450
+  F3.os = Math.max(RS, Math.min(q.ui, Math.round(w * Math.min(dpr, q.px) / VW)));
+  if (cv.width !== VW * F3.os) { cv.width = VW * F3.os; cv.height = VH * F3.os; }
 }
 function f3Show(on) {
   if (F3.shown === on || !F3.cv) return;
   F3.shown = on; F3.cv.style.display = on ? 'block' : 'none'; cv.style.background = on ? 'transparent' : '';
-  if (!on) { $('bFire').style.display = 'none'; if (document.pointerLockElement) document.exitPointerLock(); }
+  if (!on) {
+    $('bFire').style.display = 'none'; if (document.pointerLockElement) document.exitPointerLock();
+    if (cv.width !== VW * RS) { cv.width = VW * RS; cv.height = VH * RS; }   // back to the classic 800x450 canvas
+    ctx.setTransform(RS, 0, 0, RS, 0, 0); ctx.imageSmoothingEnabled = false; F3.w = 0;
+  }
 }
 function f3FindTarget(m) {
   const p = m.player; let best = null, bd = 1e9;
@@ -4575,6 +4624,7 @@ function f3FindTarget(m) {
 }
 
 function f3Render(ctx, m, t, dt) {
+  if (F3.aa !== f3Gfx().aa) f3MakeRenderer();   // quality changed in the settings
   if (F3.m !== m) f3Build(m);
   F3.dt = dt;
   f3Show(true); f3Resize();
@@ -4605,7 +4655,7 @@ function f3Render(ctx, m, t, dt) {
   F3.target = playing && !p.riding ? f3FindTarget(m) : null;
 
   // ----- sprites -----
-  F3.sn = 0;
+  F3.sn = 0; F3.shN = 0;
   // things standing on top of the player (melee enemies, the dog) are drawn a little away so they never fill the screen
   const near = (o, min) => {
     const dx = o.x - p.x, dy = o.y - p.y, d = Math.hypot(dx, dy); if (d >= min) return o;
@@ -4618,21 +4668,24 @@ function f3Render(ctx, m, t, dt) {
     const s = Math.min(1.5, d.scale || 1) * 0.8;
     const fuse = e.fuseT !== undefined && (t * 12 | 0) % 2;
     const q = near(e, 14 * Math.max(1, s));
+    f3Shade(q.x, q.y, k === 'drone' ? 9 : e.r * 2.8);
     f3Sprite(c, q.x, k === 'drone' ? 12 + Math.sin(t * 3 + e.wob) * 0.8 : 0, q.y, s, ally ? 0x8fd8ff : fuse ? 0xffa040 : e.state === 'sleep' ? 0xb0b6c8 : 0xffffff);
   };
   if (m.allies) m.allies.forEach(e => unit(e, true));
   m.enemies.forEach(e => unit(e, false));
   if (m.dog && !m.dog.hidden && m.state !== 'dead') {
     const f = (typeof DOG_FURS !== 'undefined' && S.dog && DOG_FURS[S.dog.fur]) || { base: '#8a5a32', dark: '#5e3a1e', light: '#c89a6a' };
-    f3Sprite(f3CharCanvas('dog', { A: f.base, H: f.light, d: f.dark }), near(m.dog, 12).x, 0, near(m.dog, 12).y, 0.8);
+    f3Sprite(f3CharCanvas('dog', { A: f.base, H: f.light, d: f.dark }), near(m.dog, 20).x, 0, near(m.dog, 20).y, 0.8); f3Shade(near(m.dog, 20).x, near(m.dog, 20).y, 11);
   }
   m.pickups.forEach(o => {
     const c = o.type === 'key' ? f3IconCanvas('key') : o.type === 'mod' ? f3IconCanvas('mod') : iconSpriteHi('icon', o.type === 'gear' ? 'lootbox' : o.type === 'med' ? 'medkit' : o.type);
-    f3Sprite(c, o.x, 2 + Math.sin(o.bob * 4) * 0.6, o.y, o.type === 'credit' ? 0.45 : 0.7);
+    f3Sprite(c, o.x, 2 + Math.sin(o.bob * 4) * 0.6, o.y, o.type === 'credit' ? 0.45 : 0.7); f3Shade(o.x, o.y, o.type === 'credit' ? 4 : 7);
   });
   if (m.mines) m.mines.forEach(o => f3Sprite(f3IconCanvas('mine'), o.x, -0.8, o.y, 0.6));
   if (m.nades) m.nades.forEach(o => f3Sprite(f3IconCanvas(o.kind === 'flash' ? 'flashb' : 'nade'), o.x, o.z - 1, o.y, 0.5));
   for (let i = F3.sn; i < F3.pool.length; i++) F3.pool[i].visible = false;
+  if (F3.heli && F3.heli.visible) f3Shade(hl.x, hl.y, 62 - 22 * Math.min(1, f3HeliAlt(hl) / 75));
+  F3.shadow.count = F3.shN; F3.shadow.instanceMatrix.needsUpdate = true;
 
   // ----- points: glow (additive) and smoke / debris (normal blending) -----
   const Sm = F3.Sm; F3.G.n = 0; Sm.n = 0;
@@ -4708,6 +4761,7 @@ function f3Render(ctx, m, t, dt) {
 // ---------- 2D overlay on the game canvas: numbers, weapon, crosshair, radar ----------
 function f3Overlay(ctx, m, t) {
   const p = m.player, playing = m.state === 'play';
+  ctx.setTransform(F3.os, 0, 0, F3.os, 0, 0); ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, VW, VH);
   if (m.night || m.weather) f3Atmos(ctx, m, t);
   if (m.fx) m.fx.forEach(o => { if (o.k === 'screen' && Math.hypot(o.x - p.x, o.y - p.y) < 200 && losClear(m, p.x, p.y, o.x, o.y)) { ctx.fillStyle = `rgba(255,236,200,${0.22 * o.t / o.T})`; ctx.fillRect(0, 0, VW, VH); } });
@@ -4861,7 +4915,7 @@ function f3Atmos(ctx, m, t) {
     (m.flares || []).forEach(f => light(f.x, f.y, SUPPLIES.flare.rad * 1.1, Math.min(1, f.t / 1.5)));
     (m.fx || []).forEach(o => { if (o.k === 'flash') light(o.x, o.y, o.r, o.t / o.T); });
     if (m.heli && heliShown(m.heli) && !p.riding) light(m.heli.x, m.heli.y, 60, 0.6);
-    ctx.drawImage(c, 0, 0, VW, VH);
+    ctx.imageSmoothingEnabled = true; ctx.drawImage(c, 0, 0, VW, VH); ctx.imageSmoothingEnabled = false;
     if (m.state !== 'dead' && !p.riding) {   // warm tint of the flashlight
       ctx.globalCompositeOperation = 'lighter';
       const R = Math.tan(INTERACT.nightAngle) * F, g = ctx.createRadialGradient(cx, cy + 4, 4, cx, cy + 4, R);
@@ -4871,15 +4925,7 @@ function f3Atmos(ctx, m, t) {
   }
   if (m.weather === 'rain') {
     ctx.fillStyle = 'rgba(30,45,80,0.12)'; ctx.fillRect(0, 0, VW, VH);
-    ctx.strokeStyle = 'rgba(190,210,240,0.42)'; ctx.lineWidth = 0.6; ctx.beginPath();
-    for (let i = 0; i < 110; i++) {
-      const sx = (i * 97.31) % (VW + 20) - 10, sy = (i * 53.77 + t * (360 + (i % 5) * 45)) % (VH + 40) - 20, len = 9 + (i % 4) * 4;
-      ctx.moveTo(sx, sy); ctx.lineTo(sx - 1.4, sy + len);
-    }
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(210,225,245,0.5)'; ctx.lineWidth = 1; ctx.beginPath();   // a few big drops close to the eye
-    for (let i = 0; i < 10; i++) { const sx = (i * 173.3 + 40) % VW, sy = (i * 91.7 + t * 520) % (VH + 60) - 30; ctx.moveTo(sx, sy); ctx.lineTo(sx - 3, sy + 22); }
-    ctx.stroke();
+    rainStreaks(ctx, t, 0, 0, 150, 1.7, 0.12);   // seen from the side: faster, longer, nearly vertical
   } else if (m.weather === 'fog') {
     const g = ctx.createRadialGradient(cx, cy, 40, cx, cy, VW * 0.6);
     g.addColorStop(0, 'rgba(200,206,212,0.04)'); g.addColorStop(1, 'rgba(200,206,212,0.34)'); ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
