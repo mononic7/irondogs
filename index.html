@@ -582,6 +582,16 @@ const SUPPLIES = {
 };
 const SUPPLY_ORDER = ['grenade', 'flash', 'flare', 'mine', 'medkit'];
 // map interaction (interact.js)
+// First-person view only (m.fp is set by the main loop while the 3D view is on): the player cannot see behind and turning
+// takes time, so threats are softened a little. The top-down view keeps the original numbers. Measured with test/balance_sim.mjs.
+//   hurt       all damage taken            hurtBack   damage from a source outside the view (more than backAngle rad off the view direction)
+//   meleeSpeed walking speed of melee enemies and bombers       shotSpeed  enemy bullet speed (not the sniper's)
+//   bomberFuse / sniperAim  longer warning before the blast / the shot
+//   warnDist   awake enemies this close but outside the view get a marker at the edge of the crosshair ring
+// v3.5 values: bots take about x1.4-1.5 the top-down damage in first person with all of these at 1; with the values below about
+// x1.0-1.3 when the edge markers are ignored and well below x1 when they are used (see HISTORY.md). hurt / meleeSpeed were left at 1.
+const FP_BAL = { hurt: 1, hurtBack: 0.7, backAngle: 1.1, meleeSpeed: 1, shotSpeed: 0.9, bomberFuse: 1.3, sniperAim: 1.2, warnDist: 96 };
+function fpBal(m, k) { return m.fp ? FP_BAL[k] : 1; }
 const INTERACT = {
   barrelRoom: 0.55, barrelHp: 12, barrelRad: 40, barrelDmg: 70, barrelHurt: 30,          // explosive barrels (chance per room, hp, blast)
   vaultLvl: 2, vaultChance: 0.6,                                                           // locked vault room + key card (indoor)
@@ -1814,7 +1824,7 @@ function updateBomber(m, e, dt, dist) {
     if (e.fuseT <= 0) killEnemy(m, e);
     return true;
   }
-  if (dist < b.trig + p.r && losClear(m, e.x, e.y, p.x, p.y)) { e.fuseT = b.fuse; SFX.play('beep'); return true; }
+  if (dist < b.trig + p.r && losClear(m, e.x, e.y, p.x, p.y)) { e.fuseT = b.fuse * fpBal(m, 'bomberFuse'); SFX.play('beep'); return true; }
   return false;
 }
 function bomberBlast(m, e) {
@@ -1839,7 +1849,7 @@ function updateSniper(m, e, dt, dx, dy, dist) {
     } else if (!see && e.aimT > s.lock) e.aimT = 0;                    // lost sight while still tracking
   } else if (see) {
     e.ang = Math.atan2(dy, dx);
-    if (e.shootT <= 0) e.aimT = s.aim;
+    if (e.shootT <= 0) e.aimT = s.aim * fpBal(m, 'sniperAim');
     else if (dist < s.keep) { tx = -dx / dist; ty = -dy / dist; }
   } else [tx, ty] = flowDir(m, e);
   if (tx || ty) { moveCircle(m, e, tx * e.speed * dt, ty * e.speed * dt); if (!see) e.ang = Math.atan2(ty, tx); }
@@ -1926,7 +1936,12 @@ function hurtPlayer(m, dmg, fx, fy) {
   const p = m.player;
   if (m.state !== 'play' || p.riding) return;
   if (fx !== undefined) { m.hits = m.hits || []; if (m.hits.length > 7) m.hits.shift(); m.hits.push({ x: fx, y: fy, at: performance.now() }); }
-  const real = dmg * 100 / (100 + p.ps.armor);
+  let mul = 1;
+  if (m.fp) {   // first person: softer, and softer still when it comes from where the player cannot look
+    mul = FP_BAL.hurt;
+    if (fx !== undefined && Math.hypot(fx - p.x, fy - p.y) > 2 && Math.abs(((Math.atan2(fy - p.y, fx - p.x) - p.ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI) > FP_BAL.backAngle) mul = FP_BAL.hurtBack;
+  }
+  const real = dmg * mul * 100 / (100 + p.ps.armor);
   p.hp -= real; p.hurtT = 0.2; m.shake = Math.max(m.shake, 2);
   addFloat(m, p.x, p.y - 10, Math.round(real), '#ff6b5b');
   SFX.play('hurt', 120);
@@ -2094,7 +2109,7 @@ function updateEnemy(m, e, dt) {
     if (gl > 0.5) { tx = gx / gl; ty = gy / gl; }
   }
   if (tx || ty) {
-    const sp = e.speed * dt;
+    const sp = e.speed * dt * (d.ranged ? 1 : fpBal(m, 'meleeSpeed'));
     moveCircle(m, e, tx * sp, ty * sp);
     if (!d.ranged || !see) e.ang = Math.atan2(ty, tx);
   }
@@ -2103,9 +2118,9 @@ function updateEnemy(m, e, dt) {
 function updateBullets(m, dt) {
   const p = m.player;
   m.bullets = m.bullets.filter(b => {
-    const steps = Math.max(1, Math.ceil(Math.hypot(b.vx, b.vy) * dt / 4));
+    const steps = Math.max(1, Math.ceil(Math.hypot(b.vx, b.vy) * dt / 4)), sk = b.from === 'e' && !b.snipe ? fpBal(m, 'shotSpeed') : 1;
     for (let s = 0; s < steps; s++) {
-      b.x += b.vx * dt / steps; b.y += b.vy * dt / steps;
+      b.x += b.vx * sk * dt / steps; b.y += b.vy * sk * dt / steps;
       const t = tileAt(m, b.x, b.y);
       if (t !== TILE_FLOOR) {
         if (!b.explode && ((b.from === 'p' && (t === TILE_CRATE || t === TILE_GEN || t === TILE_ALARM || t === TILE_BARREL)) || (b.from === 'e' && t === TILE_BARREL))) damageTile(m, b.x, b.y, b.dmg);
@@ -4738,6 +4753,14 @@ function f3Overlay(ctx, m, t) {
       ctx.strokeStyle = `rgba(255,190,170,${0.7 * k})`; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(VW / 2, VH / 2, 51, a - 0.3, a + 0.3); ctx.stroke();
     });
   }
+  // threats outside the view: small arrows on a ring around the crosshair (top = ahead, bottom = behind)
+  if (playing && !p.riding) f3Threats(m).forEach(o => {
+    const a = o.a - F3.yaw - Math.PI / 2, r = 64, x = VW / 2 + Math.cos(a) * r, y = VH / 2 + Math.sin(a) * r, blink = (t * 10 | 0) % 2;
+    const col = o.kind === 'snipe' ? (blink ? '255,255,255' : '255,70,50') : o.kind === 'fuse' ? (blink ? '255,220,120' : '255,130,40') : '255,90,70';
+    const k = o.kind === 'near' ? 0.45 + 0.5 * (1 - o.d / FP_BAL.warnDist) : 1, s2 = o.kind === 'near' ? 4 : 6;
+    ctx.fillStyle = `rgba(${col},${k})`; ctx.beginPath();
+    ctx.moveTo(x + Math.cos(a) * s2, y + Math.sin(a) * s2); ctx.lineTo(x + Math.cos(a + 2.4) * s2, y + Math.sin(a + 2.4) * s2); ctx.lineTo(x + Math.cos(a - 2.4) * s2, y + Math.sin(a - 2.4) * s2); ctx.fill();
+  });
   // hit / kill markers: new damage numbers on enemies since the last frame
   const dt = F3.dt || 0.016;
   m.floats.forEach(o => { if (o.s3) return; o.s3 = true; if (/^\d+$/.test(o.txt) && (o.col === '#ffffff' || o.col === '#ffd34a')) { F3.hitT = 0.12; F3.hitCrit = o.col === '#ffd34a'; } });
@@ -4892,13 +4915,8 @@ function f3Radar(ctx, m, t) {
 
 // ---------- input: W/S forward-back, A/D strafe, mouse / arrows / right-side drag turn ----------
 function f3ReadInput(dt, inp, keys, sticks, mouse) {
-  // walking enemies may not stand inside the player: in first person they would be invisible and bullets (which start in front) would miss them
   if (M && M.player.riding && M.heli) F3.yaw = M.heli.ang;   // riding the helicopter: the view follows the flight
-  if (M && M.state === 'play' && !Game.paused && !M.player.riding) M.enemies.forEach(e => {
-    if (e.d.fly) return;
-    const p = M.player, dx = e.x - p.x, dy = e.y - p.y, d = Math.hypot(dx, dy), min = p.r + e.r;
-    if (d < min) { const a = d > 0.5 ? Math.atan2(dy, dx) : F3.yaw; moveCircle(M, e, Math.cos(a) * (min - d), Math.sin(a) * (min - d)); }
-  });
+  if (M && M.state === 'play' && !Game.paused && !M.player.riding) f3Separate(M, F3.yaw);
   F3.yaw += ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) * F3.keyTurn * dt;
   let f = 0, s = 0;
   if (keys.KeyW || keys.ArrowUp) f += 1; if (keys.KeyS || keys.ArrowDown) f -= 1;
@@ -4910,6 +4928,28 @@ function f3ReadInput(dt, inp, keys, sticks, mouse) {
   if (F3.tapFire > 0) F3.tapFire -= dt;
   inp.fire = mouse.down || F3.fireHeld || F3.tapFire > 0 || (F3.touch && !!F3.target);   // touch: fires by itself while the crosshair is on an enemy
   if (inp.autoFire > 0) inp.autoFire -= dt;
+}
+// walking enemies may not stand inside the player: in first person they would be invisible and bullets (which start in front) would miss them
+function f3Separate(m, yaw) {
+  const p = m.player;
+  m.enemies.forEach(e => {
+    if (e.d.fly) return;
+    const dx = e.x - p.x, dy = e.y - p.y, d = Math.hypot(dx, dy), min = p.r + e.r;
+    if (d < min) { const a = d > 0.5 ? Math.atan2(dy, dx) : yaw; moveCircle(m, e, Math.cos(a) * (min - d), Math.sin(a) * (min - d)); }
+  });
+}
+// threats the player cannot see: awake enemies close by but outside the view, a sniper taking aim, a bomber about to blow
+function f3Threats(m) {
+  const p = m.player, out = [];
+  m.enemies.forEach(e => {
+    if (e.hidden || e.state === 'sleep') return;
+    const dx = e.x - p.x, dy = e.y - p.y, d = Math.hypot(dx, dy); if (d < 2) return;
+    const a = Math.atan2(dy, dx), da = Math.abs(((a - F3.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+    if (da < 0.7) return;   // on screen
+    const snipe = e.aimT > 0, fuse = e.fuseT !== undefined;
+    if (snipe || ((d < FP_BAL.warnDist || fuse) && (e.d.fly || losClear(m, p.x, p.y, e.x, e.y)))) out.push({ a, d, kind: snipe ? 'snipe' : fuse ? 'fuse' : 'near' });
+  });
+  return out;
 }
 function f3Turn(dx, k) { F3.yaw += Math.max(-150, Math.min(150, dx)) * k * ((S && S.settings && S.settings.sens) || 1); }   // S.settings.sens: look sensitivity chosen in the settings
 
@@ -5153,6 +5193,7 @@ function frameBody(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now; clock += dt;
   ctx.setTransform(RS, 0, 0, RS, 0, 0); ctx.imageSmoothingEnabled = false;
   if (Game.mode === 'mission' && M) {
+    M.fp = f3Active(M);   // first-person balance (FP_BAL) applies only while the 3D view is on
     readInput(dt);
     if (!Game.paused && !Game.mapHeld) updateMission(M, dt, inp);
     const v3 = f3Active(M);
