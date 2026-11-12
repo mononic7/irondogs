@@ -4400,14 +4400,17 @@ function f3Art(W, H) {
     },
   };
 }
-function f3CharCanvas(kind, look, view, step) {
-  view = view || 'f'; step = step ? 1 : 0;
-  const key = [kind, look.A, look.H, look.V, look.s, look.d, view, step].join('|');
+// bosses and the unique enemy have their own, larger pictures (f3BossCanvas); sp = which one ('' = ordinary enemy)
+const F3_BOSS = { butcher: 1, hive: 1, warden: 1, pyro: 1, proto: 1, tyrant: 1 };
+function f3CharCanvas(kind, look, view, step, sp) {
+  view = view || 'f'; step = step ? 1 : 0; sp = sp && F3_BOSS[sp] ? sp : '';
+  const key = [kind, look.A, look.H, look.V, look.s, look.d, view, step, sp].join('|');
   let c = _f3Chars.get(key); if (c) return c;
   if (view === 'l') {   // mirror of the right-facing picture
-    const r = f3CharCanvas(kind, look, 'r', step); c = mkCanvas(r.width, r.height);
+    const r = f3CharCanvas(kind, look, 'r', step, sp); c = mkCanvas(r.width, r.height);
     const x = c.getContext('2d'); x.translate(r.width, 0); x.scale(-1, 1); x.drawImage(r, 0, 0);
-  } else {
+  } else if (sp) c = f3BossCanvas(sp, look, view, step);
+  else {
     const A = look.A || '#55596b', Hc = look.H || '#8d93a8', V = look.V || '#55596b', SK = look.s || '#e9b48a', D = look.d || '#5e3a1e';
     const cl = '#efe6cc', boot = '#1b1c22', red = '#ff3b2f', lift = step ? 4 : 0;
     let a;
@@ -4486,6 +4489,125 @@ function f3CharCanvas(kind, look, view, step) {
     c = f3Outline(a.b);
   }
   c.ppu = 4; _f3Chars.set(key, c); return c;
+}
+// ---------- bosses + the unique enemy: 80x88 px (20 x 22 units), each with its own equipment ----------
+//   butcher  blood-stained apron, steel jaw, cleaver and hook          pyro   furnace in the chest, welding mask, fuel tank, flame nozzle
+//   proto    bone spikes, glowing eyes and veins, a maw in the belly    hive   big four-rotor drone with honeycomb cells (always seen from the front)
+//   warden   heavy armour, cape, red visor, long rifle                  tyrant gold helmet, rotary gun, ammo pack
+function f3BossCanvas(sp, look, view, step) {
+  const A = look.A || '#55596b', Hc = look.H || '#8d93a8', V = look.V || '#2a2d36', SK = look.s || '#e9b48a';
+  const cl = '#efe6cc', red = '#ff3b2f', dk = '#15161c', steel = '#9aa0ac', lift = step ? 5 : 0, f = view === 'f', sd = view === 'r';
+  if (sp === 'hive') {
+    const a = f3Art(88, 60);
+    for (const [x, y] of [[28, 2], [60, 2], [12, 6], [76, 6]]) { a.B(x - 1, y + 2, 3, 11, '#55596b'); if (step) a.B(x - 11, y, 22, 2, steel); else a.B(x - 5, y, 10, 2, '#c8ccd8'); }
+    a.R(8, 16, 72, 4, '#2a2d36'); a.B(36, 9, 1, 9, steel); a.B(52, 9, 1, 9, steel);
+    a.E(44, 32, 27, 17, '#3a3e4e'); a.E(44, 25, 20, 9, '#55596b');
+    for (let r = 0; r < 3; r++) for (let q = 0; q < 7; q++) { const x = 21 + q * 7 + (r % 2) * 3, y = 35 + r * 5; if (a.b.get(x, y) && a.b.get(x + 4, y + 2)) { a.B(x, y, 5, 3, '#8a6a10'); a.B(x + 1, y, 3, 2, (r + q) % 3 ? '#d8a23a' : '#ffe08a'); } }
+    a.E(44, 26, 7.5, 6.5, dk); a.E(44, 26, 5.5, 4.8, red); a.B(41, 24, 3, 2, '#ffd0c8'); a.B(43, 26, 3, 3, '#7a0f0a');
+    a.B(28, 25, 4, 3, red); a.B(56, 25, 4, 3, red); a.B(22, 30, 3, 2, red); a.B(63, 30, 3, 2, red);
+    a.E(29, 51, 4, 5, '#2a2d36'); a.B(28, 53, 2, 2, '#ffd34a'); a.E(59, 51, 4, 5, '#2a2d36'); a.B(58, 53, 2, 2, '#ffd34a'); a.B(43, 48, 3, 10, dk);
+    return f3Outline(a.b);
+  }
+  const a = f3Art(80, 88);
+  const spike = (x, y, h, col) => { for (let i = 0; i < h; i++) { const w = 1 + (i * 2 / 3 | 0); a.B(x - (w >> 1), y - h + i, w, 1, col || cl); } };   // tip at the top, base at y
+  if (sp === 'warden' || sp === 'tyrant') {
+    const wd = sp === 'warden', cape = '#16202c';
+    if (sd) {
+      if (wd) { a.R(20, 26, 12, 54, cape); a.B(24, 30, 1, 48, '#0c1218'); } else a.R(17, 30, 12, 24, sh(A, 0.6));
+      a.R(31, 60, 9, 23 - lift, sh(A, 0.6)); a.B(30, 83 - lift, 15, 5, dk); a.R(39, 60, 9, 19 + lift, sh(A, 0.74)); a.B(39, 79 + lift, 15, 5, dk);
+      a.R(28, 26, 22, 36, A); a.B(28, 58, 22, 4, sh(A, 0.45)); a.E(38, 29, 10, 8, sh(A, 0.95)); a.B(30, 33, 16, 2, sh(Hc, 0.85));
+      a.E(41, 15, 11.5, 12, Hc);
+      if (wd) { a.B(45, 13, 8, 4, red); a.B(46, 13, 3, 1, '#ffd0c8'); a.B(39, 0, 4, 7, sh(Hc, 0.8)); } else { a.B(44, 11, 9, 7, '#7fe8ff'); a.B(44, 17, 9, 2, '#2a6f86'); a.B(45, 11, 3, 2, '#e8fbff'); }
+      a.B(31, 21, 18, 2, sh(Hc, 0.62));
+      if (wd) { a.R(27, 38, 10, 8, sh(V, 0.7)); a.R(36, 40, 42, 4, V); a.R(46, 34, 11, 6, sh(V, 1.5)); a.B(76, 41, 3, 2, dk); a.B(52, 44, 3, 6, sh(V, 0.6)); }
+      else { a.R(36, 39, 38, 11, V); for (let k = 0; k < 3; k++) a.B(46, 41 + k * 3, 28, 1, sh(V, 0.45)); a.B(72, 40, 4, 9, dk); a.B(44, 37, 6, 3, sh(V, 1.4)); }
+      a.L(36, 34, 50, 45, 4, sh(A, 0.86)); a.E(52, 46, 3, 3, SK);
+    } else {
+      if (wd) a.R(17, 26, 46, 54, f ? '#101820' : cape);
+      a.R(27, 60, 11, 23 - lift, sh(A, 0.68)); a.B(25, 83 - lift, 15, 5, dk); a.R(42, 60, 11, 19 + lift, sh(A, 0.58)); a.B(41, 79 + lift, 15, 5, dk);
+      a.R(9, 32, 10, 22, sh(A, 0.82)); a.R(61, 32, 10, 22, sh(A, 0.66));
+      a.R(21, 26, 38, 36, A); a.B(21, 58, 38, 4, sh(A, 0.45)); a.B(37, 58, 6, 4, steel);
+      a.E(15, 28, 10, 8, A); a.E(65, 28, 10, 8, sh(A, 0.85)); a.B(7, 32, 16, 2, sh(Hc, 0.9)); a.B(57, 32, 16, 2, sh(Hc, 0.75));
+      if (wd) { spike(12, 21, 7, steel); spike(68, 21, 7, steel); }
+      if (f) {
+        a.R(26, 30, 28, 18, sh(A, 0.86)); a.B(37, 33, 6, 12, Hc); a.B(33, 37, 14, 4, Hc);
+        a.E(40, 15, 12.5, 12.5, Hc);
+        if (wd) { a.B(29, 13, 22, 4, red); a.B(31, 13, 6, 1, '#ffd0c8'); a.B(38, 0, 4, 7, sh(Hc, 0.8)); } else { a.B(30, 11, 20, 7, '#7fe8ff'); a.B(30, 17, 20, 2, '#2a6f86'); a.B(32, 11, 5, 2, '#e8fbff'); }
+        a.B(34, 22, 12, 4, sh(Hc, 0.7));
+        if (wd) { a.L(20, 62, 62, 30, 2.6, V); a.R(38, 36, 10, 6, sh(V, 1.5)); a.B(61, 25, 5, 5, dk); a.E(27, 57, 3, 3, SK); a.E(51, 39, 3, 3, SK); }
+        else {
+          a.R(27, 44, 26, 12, sh(V, 0.9)); a.E(40, 50, 9.5, 9.5, V); a.E(40, 50, 3, 3, sh(V, 1.5));
+          for (let k = 0; k < 6; k++) a.B(Math.round(40 + Math.cos(k * 1.047) * 6) - 1, Math.round(50 + Math.sin(k * 1.047) * 6) - 1, 2, 2, '#000000');
+          a.E(25, 52, 3, 3, SK); a.E(55, 52, 3, 3, SK);
+        }
+      } else {
+        if (wd) { a.R(19, 26, 42, 54, cape); for (let k = 0; k < 5; k++) a.B(24 + k * 8, 30, 1, 48, '#0c1218'); a.B(60, 12, 3, 16, V); }
+        else { a.R(26, 28, 28, 26, sh(A, 0.6)); a.B(26, 38, 28, 2, '#d4a017'); a.B(26, 46, 28, 2, '#d4a017'); a.E(11, 55, 3, 3, SK); a.E(69, 55, 3, 3, SK); }
+        a.E(40, 15, 12.5, 12.5, Hc); a.B(29, 20, 22, 2, sh(Hc, 0.6)); if (wd) a.B(38, 0, 4, 7, sh(Hc, 0.8));
+      }
+    }
+    return f3Outline(a.b);
+  }
+  // the three big mutants share a body; equipment and faces differ
+  const mag = '#e070ff', maw = '#1a0822', mask = '#3a3e4e', fire = '#ff7a1e';
+  if (sd) {
+    if (sp === 'pyro') { a.R(15, 28, 12, 30, '#8a1f14'); a.B(15, 36, 12, 3, '#3a0a06'); a.B(15, 48, 12, 3, '#3a0a06'); a.B(19, 23, 4, 5, steel); }
+    if (sp === 'proto') for (let k = 0; k < 5; k++) spike(21 + (k % 2) * 2, 34 + k * 7, 8);
+    a.L(33, 62, 29, 82 - lift, 6, sh(A, 0.6)); a.B(22, 83 - lift, 16, 4, sh(A, 0.4));
+    a.L(42, 62, 47, 78 + lift, 6, sh(A, 0.74)); a.B(42, 79 + lift, 16, 4, sh(A, 0.4));
+    a.E(37, 43, 16, 22, A); a.E(47, 18, 11, 11.5, Hc);
+    if (sp === 'butcher') { a.R(46, 34, 8, 34, '#c8c0b0'); a.B(48, 46, 4, 8, '#8a2020'); a.B(47, 58, 3, 5, '#a02a2a'); a.B(52, 15, 5, 3, red); a.R(49, 21, 10, 7, steel); a.B(51, 22, 2, 3, cl); a.B(55, 22, 2, 3, cl); }
+    if (sp === 'pyro') { a.R(45, 9, 15, 15, mask); a.B(53, 15, 7, 3, '#ffb050'); a.B(49, 38, 4, 15, fire); a.B(50, 41, 2, 9, '#ffd34a'); }
+    if (sp === 'proto') { spike(43, 9, 9); a.B(51, 14, 6, 4, mag); a.B(53, 15, 2, 2, '#ffffff'); a.B(45, 20, 4, 3, mag); a.B(50, 24, 8, 3, maw); a.B(49, 42, 4, 16, maw); for (let k = 0; k < 4; k++) a.B(51, 43 + k * 4, 2, 2, cl); a.B(40, 34, 1, 16, mag); a.L(44, 48, 57, 57, 3, sh(A, 1.1)); }
+    a.L(38, 32, 52, 58, 5.5, sh(A, 0.9));
+    if (sp === 'butcher') { a.B(52, 55, 3, 8, '#5a3d22'); a.R(54, 60, 18, 12, '#b8bcc8'); a.B(54, 70, 18, 2, '#8a2020'); }
+    else if (sp === 'pyro') { a.R(50, 54, 20, 8, mask); a.B(70, 55, 4, 6, dk); a.B(74, 56, 4, 4, '#ff9a2e'); a.B(76, 57, 3, 2, '#ffe08a'); }
+    else for (let k = 0; k < 3; k++) a.B(50 + k * 3, 60, 2, 7, cl);
+    return f3Outline(a.b);
+  }
+  if (sp === 'proto') { spike(12, 26, 9); spike(19, 24, 12); spike(61, 24, 12); spike(68, 26, 9); spike(31, 9, 9); spike(49, 9, 9); }
+  a.L(30, 62, 27, 82 - lift, 6.5, sh(A, 0.62)); a.B(19, 83 - lift, 16, 4, sh(A, 0.4));
+  a.L(50, 62, 53, 78 + lift, 6.5, sh(A, 0.55)); a.B(46, 79 + lift, 16, 4, sh(A, 0.4));
+  a.L(15, 32, 9, 60, 6, sh(A, 0.9)); a.L(65, 32, 71, 60, 6, sh(A, 0.72));
+  if (sp === 'proto') { a.L(24, 48, 15, 61, 3, sh(A, 1.12)); a.L(56, 48, 65, 61, 3, sh(A, 0.86)); }
+  a.E(40, 44, 22, 22, A); a.E(17, 30, 9, 7.5, sh(A, 1.05)); a.E(63, 30, 9, 7.5, sh(A, 0.9));
+  a.E(40, 17, 12, 12, Hc);
+  // hands
+  if (sp === 'butcher') { a.L(9, 62, 6, 70, 2, steel); a.L(6, 70, 11, 75, 2, steel); a.B(69, 55, 3, 10, '#5a3d22'); a.R(64, 64, 14, 18, '#b8bcc8'); a.B(64, 79, 14, 3, '#8a2020'); }
+  else if (sp === 'pyro') { for (let k = 0; k < 3; k++) a.B(4 + k * 3, 62, 2, 7, cl); a.R(65, 52, 11, 16, mask); a.B(67, 68, 7, 4, dk); a.B(68, 71, 5, 3, '#ff9a2e'); a.B(69, 73, 3, 2, '#ffe08a'); }
+  else for (let k = 0; k < 3; k++) { a.B(4 + k * 3, 62, 2, 7, cl); a.B(68 + k * 3, 62, 2, 7, cl); }
+  if (sp === 'butcher') {
+    if (f) {
+      a.R(27, 34, 26, 36, '#c8c0b0'); a.B(30, 26, 3, 9, '#8a8478'); a.B(47, 26, 3, 9, '#8a8478');
+      a.B(31, 44, 6, 9, '#8a2020'); a.B(42, 52, 7, 6, '#a02a2a'); a.B(36, 62, 4, 6, '#8a2020'); a.B(46, 38, 3, 4, '#8a2020'); a.B(33, 54, 2, 2, '#8a2020');
+      a.B(30, 11, 20, 3, sh(Hc, 0.65)); a.B(32, 15, 5, 3, red); a.B(43, 15, 5, 3, red); a.B(33, 15, 2, 1, '#ffd0c8'); a.B(44, 15, 2, 1, '#ffd0c8');
+      a.R(31, 20, 18, 8, steel); for (let k = 0; k < 5; k++) a.B(33 + k * 3, 21, 2, 3, cl); a.B(32, 26, 1, 1, dk); a.B(47, 26, 1, 1, dk);
+      a.B(40, 5, 1, 7, '#3a0f0f'); for (let k = 0; k < 3; k++) a.B(38, 6 + k * 2, 5, 1, '#3a0f0f');
+    } else {
+      a.L(28, 28, 52, 60, 1.5, '#8a8478'); a.L(52, 28, 28, 60, 1.5, '#8a8478'); a.B(24, 58, 32, 2, '#8a8478');
+      for (let k = 0; k < 7; k++) { a.B(39, 27 + k * 5, 2, 3, '#3a0f0f'); a.B(37, 28 + k * 5, 6, 1, '#3a0f0f'); }
+      a.B(33, 12, 10, 1, '#3a0f0f'); for (let k = 0; k < 4; k++) a.B(34 + k * 3, 10, 1, 5, '#3a0f0f');
+    }
+  } else if (sp === 'pyro') {
+    a.B(13, 26, 8, 2, fire); a.B(59, 26, 8, 2, fire);
+    if (f) {
+      a.L(22, 28, 30, 38, 2, steel); a.L(58, 28, 50, 38, 2, steel);
+      a.B(28, 34, 24, 22, dk); a.B(30, 36, 20, 18, fire); a.B(33, 39, 14, 12, '#ffd34a'); a.B(37, 42, 6, 6, '#fff6c8');
+      for (let k = 0; k < 4; k++) a.B(33 + k * 5, 36, 2, 18, dk); a.B(30, 44, 20, 2, dk);
+      a.R(30, 9, 20, 15, mask); a.B(32, 15, 16, 3, '#ffb050'); a.B(34, 16, 12, 1, '#fff6c8'); for (const x of [31, 48]) { a.B(x, 10, 1, 1, steel); a.B(x, 22, 1, 1, steel); }
+    } else {
+      a.R(27, 26, 26, 32, '#8a1f14'); a.B(27, 34, 26, 3, '#3a0a06'); a.B(27, 49, 26, 3, '#3a0a06'); a.B(34, 38, 12, 9, '#ffd34a'); a.B(39, 40, 2, 4, dk); a.B(39, 45, 2, 1, dk);
+      a.B(38, 21, 4, 6, steel); a.L(53, 32, 68, 52, 2, '#2a2d36'); a.R(31, 10, 18, 12, mask);
+    }
+  } else {   // proto
+    for (const [x, y, w, h] of [[24, 36, 1, 14], [25, 49, 6, 1], [55, 34, 1, 16], [49, 50, 6, 1], [33, 60, 1, 6], [46, 58, 1, 7]]) a.B(x, y, w, h, mag);
+    if (f) {
+      a.B(35, 42, 10, 18, maw); for (let k = 0; k < 5; k++) { a.B(35, 43 + k * 3, 2, 2, cl); a.B(43, 44 + k * 3, 2, 2, cl); } a.B(39, 47, 2, 8, mag);
+      for (const [x, y, w, h] of [[32, 13, 5, 4], [43, 13, 5, 4], [38, 7, 4, 3], [28, 32, 4, 3], [49, 31, 4, 3]]) { a.B(x, y, w, h, mag); a.B(x + 1, y + 1, 2, 1, '#ffffff'); }
+      a.B(34, 21, 12, 3, maw); for (let k = 0; k < 4; k++) a.B(35 + k * 3, 21, 1, 2, cl);
+    } else for (let k = 0; k < 6; k++) spike(40, 30 + k * 7, 8);
+  }
+  return f3Outline(a.b);
 }
 function f3IconCanvas(name) {
   F3.icons = F3.icons || {};
@@ -4832,13 +4954,14 @@ function f3Render(ctx, m, t, dt) {
     const d = e.d, k = d.kind;
     if (e._x3 !== undefined && Math.hypot(e.x - e._x3, e.y - e._y3) > 0.04) e._w3 = (e._w3 || 0) + (F3.dt || 0);   // the walk only advances while it moves
     e._x3 = e.x; e._y3 = e.y;
-    const base = k === 'drone' ? f3CharCanvas(k, d.look || {}, 'f', (t * 20 | 0) & 1) : f3CharCanvas(k, d.look || {}, view(e.ang, e), ((e._w3 || 0) * 5 | 0) & 1);
+    const sp = d.boss || (d.unique ? e.type : '');   // bosses / the unique enemy: own picture
+    const base = k === 'drone' ? f3CharCanvas(k, d.look || {}, 'f', (t * 20 | 0) & 1, sp) : f3CharCanvas(k, d.look || {}, view(e.ang, e), ((e._w3 || 0) * 5 | 0) & 1, sp);
     let c = base; if (e.flash > 0) { c = whiteOf(base); c.ppu = base.ppu; }
-    const s = Math.min(1.5, d.scale || 1) * 0.8;
+    const s = base.width > 56 ? (m.field ? 1.1 : 0.95) : Math.min(1.5, d.scale || 1) * 0.8;   // boss pictures are drawn large already (indoors they just fit under the ceiling)
     const fuse = e.fuseT !== undefined && (t * 12 | 0) % 2;
     const q = near(e, 14 * Math.max(1, s));
     f3Shade(q.x, q.y, k === 'drone' ? 9 : e.r * 2.8);
-    f3Sprite(c, q.x, k === 'drone' ? 12 + Math.sin(t * 3 + e.wob) * 0.8 : 0, q.y, s, ally ? 0x8fd8ff : fuse ? 0xffa040 : e.state === 'sleep' ? 0xb0b6c8 : 0xffffff);
+    f3Sprite(c, q.x, k === 'drone' ? (base.width > 56 ? 5 : 12) + Math.sin(t * 3 + e.wob) * 0.8 : 0, q.y, s, ally ? 0x8fd8ff : fuse ? 0xffa040 : e.state === 'sleep' ? 0xb0b6c8 : 0xffffff);
   };
   if (m.allies) m.allies.forEach(e => unit(e, true));
   m.enemies.forEach(e => unit(e, false));
@@ -4938,7 +5061,7 @@ function f3Overlay(ctx, m, t) {
   // enemy health bars / sleep marks / damage numbers
   m.enemies.forEach(e => {
     if (e.hidden || !visibleAt(m, e.x, e.y) || !losClear(m, p.x, p.y, e.x, e.y)) return;
-    const top = e.d.kind === 'drone' ? 21 : Math.min(1.5, e.d.scale || 1) * 15 + 2, q = f3Project(e.x, top, e.y); if (!q) return;
+    const top = e.d.unique ? 23 : e.d.kind === 'drone' ? 21 : Math.min(1.5, e.d.scale || 1) * 15 + 2, q = f3Project(e.x, top, e.y); if (!q) return;
     if (e.state === 'sleep') { ctx.fillStyle = '#bfe0ff'; ctx.font = 'bold 7px sans-serif'; ctx.fillText('z', q.x + 3, q.y - (t * 3 % 3)); }
     else if (e.d.unique) {
       ctx.fillStyle = '#000'; ctx.fillRect(q.x - 16, q.y - 3, 32, 3); ctx.fillStyle = '#ffb020'; ctx.fillRect(q.x - 16, q.y - 3, 32 * Math.max(0, e.hp / e.maxHp), 3);
