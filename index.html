@@ -4253,46 +4253,119 @@ function f3Tex(c, smooth) {
   }
   return t;
 }
-function f3WallCanvas(th) {
-  const [top, mid, face, edge] = th.wall, h = F3.wallH * RS, c = mkCanvas(FT, h), x = c.getContext('2d');
-  px1(x, 0, 0, FT, h, face);
-  for (let xx = 2; xx < FT; xx += 6) px1(x, xx, 8, 1, h - 14, sh(face, 1.16));
-  px1(x, 0, 0, FT, 7, mid); px1(x, 0, 0, FT, 1, edge); px1(x, 0, 7, FT, 1, sh(face, 0.6));
-  px1(x, 5, 14, 22, 16, mid); px1(x, 6, 15, 20, 14, sh(top, 0.92)); px1(x, 6, 15, 20, 1, edge);
-  if (th.style === 'tread') for (let k = 0; k < 4; k++) px1(x, 9, 18 + k * 3, 14, 1, sh(mid, 0.75));
-  if (th.style === 'tiles') px1(x, 9, 21, 14, 2, '#9ff3f3');
-  if (th.style === 'rust') { px1(x, 12, 15, 2, 14, '#7a4426'); px1(x, 20, 30, 3, 10, '#7a4426'); }
-  if (th.style === 'ruin') { for (let k = 0, cx = 9, cy = 9; k < 10; k++) { px1(x, cx, cy, 1, 3, '#3a362f'); cx += k % 3 ? 1 : -2; cy += 3; } px1(x, 20, h - 14, 8, 9, '#3f5f2f'); px1(x, 22, h - 18, 4, 4, '#47693a'); px1(x, 2, h - 9, 6, 4, '#3f5f2f'); }
-  px1(x, 0, h - 5, FT, 5, sh(face, 0.55)); px1(x, 0, h - 5, FT, 1, sh(edge, 0.7));
-  px1(x, 0, 0, 1, h, sh(face, 0.7));
-  return c;
+// wall panel, 64 px per tile (4 px per world unit). v = 0..3: inset panel / pipes + fuse box / riveted plating / panel + warning stripe.
+// The variant is picked per wall tile so long walls do not repeat one picture.
+function f3WallCanvas(th, v) {
+  F3.wallCache = F3.wallCache || {};
+  const key = th.name + '|' + v; if (F3.wallCache[key]) return F3.wallCache[key];
+  const [top, mid, face, edge] = th.wall, W = 64, H = F3.wallH * 4, c = mkCanvas(W, H), x = c.getContext('2d'), P = (a, b, w, h, col) => px1(x, a, b, w, h, col);
+  const N = (k, q) => noiseAt(k, v + 1, q);
+  P(0, 0, W, H, face);
+  for (let i = 0; i < W; i += 4) P(i, 16, 1, H - 28, sh(face, i % 8 ? 1.07 : 0.93));                       // brushed grain
+  for (let k = 0; k < 70; k++) P(2 + (N(k, 71) * 60 | 0), 16 + (N(k, 72) * (H - 30) | 0), 1, 1, sh(face, N(k, 73) < 0.5 ? 0.8 : 1.16));
+  P(0, 0, W, 14, mid); P(0, 0, W, 2, edge); P(0, 2, W, 1, sh(mid, 1.15)); P(0, 12, W, 2, sh(mid, 0.68));   // top beam
+  for (let i = 6; i < W; i += 14) { P(i, 5, 3, 3, sh(mid, 0.58)); P(i, 5, 1, 1, edge); }
+  P(0, 14, 1, H - 26, sh(face, 0.58)); P(1, 14, 1, H - 26, sh(face, 1.2)); P(W - 1, 14, 1, H - 26, sh(face, 0.58));   // seam between panels
+  if (v === 0 || v === 3) {
+    P(10, 24, 44, 34, sh(face, 0.58)); P(11, 25, 42, 32, mid); P(12, 26, 40, 30, sh(top, 0.92)); P(12, 26, 40, 1, edge); P(12, 26, 1, 30, edge); P(51, 26, 1, 30, sh(mid, 0.7));
+    if (th.style === 'tread') for (let k = 0; k < 6; k++) { P(17, 31 + k * 4, 30, 2, sh(mid, 0.66)); P(17, 33 + k * 4, 30, 1, sh(top, 1.1)); }
+    else if (th.style === 'tiles') { P(16, 31, 32, 14, '#0f1a24'); P(18, 34, 28, 2, '#9ff3f3'); P(18, 38, 18, 2, '#4fb8c8'); P(18, 42, 10, 1, '#2a6f86'); P(16, 48, 6, 4, '#6fdc6f'); P(24, 48, 6, 4, sh(mid, 0.6)); }
+    else if (th.style === 'rust') { P(20, 26, 5, 30, '#7a4426'); P(21, 26, 1, 30, '#9a5a36'); P(34, 40, 7, 16, '#7a4426'); P(40, 30, 3, 8, '#5e3319'); }
+    else for (let k = 0; k < 5; k++) P(16 + k * 7, 30 + (k % 2) * 9, 5, 14, sh(mid, 0.8));
+    for (const [bx, by] of [[13, 27], [49, 27], [13, 53], [49, 53]]) { P(bx, by, 2, 2, sh(mid, 0.5)); P(bx, by, 1, 1, edge); }
+    if (v === 3) for (let i = 0; i < W; i += 8) { P(i, H - 23, 4, 6, '#e0b020'); P(i + 4, H - 23, 4, 6, '#1b1c22'); }
+  } else if (v === 1) {
+    for (const q of [13, 24]) {
+      P(q, 14, 7, H - 26, sh(mid, 0.82)); P(q, 14, 2, H - 26, sh(edge, 0.95)); P(q + 6, 14, 1, H - 26, sh(face, 0.45));
+      for (const py of [28, 58]) { P(q - 1, py, 9, 5, sh(mid, 0.6)); P(q - 1, py, 9, 1, edge); }
+    }
+    P(39, 32, 17, 22, sh(face, 0.55)); P(40, 33, 15, 20, mid); P(40, 33, 15, 1, edge);
+    P(43, 37, 3, 3, th.style === 'tiles' ? '#4fe0ff' : '#ff5544'); P(49, 37, 3, 3, '#6fdc6f');
+    for (let k = 0; k < 4; k++) P(43, 43 + k * 2, 9, 1, sh(mid, 0.66));
+  } else {
+    for (const py of [30, 58]) { P(2, py, W - 4, 1, sh(face, 0.62)); P(2, py + 1, W - 4, 1, sh(face, 1.16)); }
+    for (let i = 6; i < W; i += 13) for (const py of [22, 44, 70]) { P(i, py, 2, 2, sh(face, 0.58)); P(i, py, 1, 1, sh(edge, 0.9)); }
+    P(21, 35, 22, 11, sh(mid, 0.72)); P(22, 36, 20, 9, sh(top, 0.95)); for (let k = 0; k < 3; k++) P(26 + k * 5, 39, 3, 4, sh(mid, 0.5));
+  }
+  if (th.style === 'rust') for (let k = 0; k < 4; k++) P(4 + (N(k, 74) * 54 | 0), 14, 2 + (N(k, 75) * 3 | 0), 14 + (N(k, 76) * 44 | 0), 'rgba(120,62,28,0.42)');   // rust runs
+  if (th.style === 'ruin') {
+    for (let k = 0, cx = 16 + v * 9, cy = 18; k < 13; k++) { P(cx, cy, 2, 5, '#3a362f'); cx += k % 3 ? 2 : -3; cy += 5; }                                           // crack
+    P(34 + v * 4, H - 28, 18, 16, '#3f5f2f'); P(38 + v * 4, H - 34, 9, 7, '#47693a'); P(2, H - 20, 13, 8, '#3f5f2f');
+    for (let k = 0; k < 14; k++) P(34 + v * 4 + (N(k, 77) * 17 | 0), H - 30 + (N(k, 78) * 17 | 0), 2, 2, k % 2 ? '#5a7d44' : '#304a24');
+  }
+  P(0, H - 12, W, 12, sh(face, 0.52)); P(0, H - 12, W, 2, sh(edge, 0.7)); P(0, H - 3, W, 3, sh(face, 0.36));   // skirting
+  for (let i = 4; i < W; i += 12) P(i, H - 8, 6, 1, sh(face, 0.72));
+  return F3.wallCache[key] = c;
 }
-function f3CeilCanvas(th) {
-  const c = mkCanvas(FT, FT), x = c.getContext('2d'), b = sh(th.wall[2], 0.62);
-  px1(x, 0, 0, FT, FT, b); px1(x, 0, 0, FT, 1, sh(b, 1.3)); px1(x, 0, 0, 1, FT, sh(b, 1.3)); px1(x, 0, FT - 1, FT, 1, sh(b, 0.6)); px1(x, FT - 1, 0, 1, FT, sh(b, 0.6));
-  px1(x, 12, 12, 8, 8, sh(b, 0.75));
-  return c;
+function f3CeilCanvas(th, night) {
+  F3.ceilCache = F3.ceilCache || {};
+  const key = th.name + (night ? 'n' : ''); if (F3.ceilCache[key]) return F3.ceilCache[key];
+  const c = mkCanvas(64, 64), x = c.getContext('2d'), b = sh(th.wall[2], 0.62), P = (a, q, w, h, col) => px1(x, a, q, w, h, col);
+  P(0, 0, 64, 64, b); P(0, 0, 64, 2, sh(b, 1.3)); P(0, 0, 2, 64, sh(b, 1.3)); P(0, 62, 64, 2, sh(b, 0.55)); P(62, 0, 2, 64, sh(b, 0.55));
+  for (let k = 0; k < 40; k++) P(3 + (noiseAt(k, 2, 91) * 58 | 0), 3 + (noiseAt(k, 3, 91) * 58 | 0), 1, 1, sh(b, noiseAt(k, 4, 91) < 0.5 ? 0.8 : 1.2));
+  for (const [bx, by] of [[5, 5], [57, 5], [5, 57], [57, 57]]) { P(bx, by, 2, 2, sh(b, 0.6)); P(bx, by, 1, 1, sh(b, 1.4)); }
+  P(20, 25, 24, 14, sh(b, 0.5)); P(22, 27, 20, 10, night ? '#39414d' : '#dfe8f0'); P(22, 27, 20, 2, night ? '#4a5461' : '#ffffff'); P(31, 27, 2, 10, sh(b, 0.7));   // lamp
+  return F3.ceilCache[key] = c;
 }
 function f3PropCanvases() {
   if (F3.propC) return F3.propC;
-  const mk = (bg, fn) => { const c = mkCanvas(FT, FT), x = c.getContext('2d'); px1(x, 0, 0, FT, FT, bg); fn(x); return c; };
-  const barrel = mk('#8a1f14', x => {
-    px1(x, 0, 0, 5, FT, '#5c120b'); px1(x, FT - 6, 0, 6, FT, '#4a0e08'); px1(x, 8, 0, 3, FT, '#b83a2a');
-    px1(x, 0, 5, FT, 2, '#3a0a06'); px1(x, 0, 25, FT, 2, '#3a0a06');
-    for (let k = 0; k < 4; k++) { px1(x, 4 + k * 7, 12, 4, 7, '#ffd34a'); px1(x, 7 + k * 7, 12, 3, 7, '#1b1c22'); }
+  const mk = (bg, fn) => { const c = mkCanvas(64, 64), x = c.getContext('2d'); px1(x, 0, 0, 64, 64, bg); fn((a, b, w, h, col) => px1(x, a, b, w, h, col), x); return c; };
+  const crate = mk('#0b0b12', P => {
+    P(2, 2, 60, 60, '#7a5530');
+    for (let k = 0; k < 5; k++) {
+      const y = 2 + k * 12; P(2, y, 60, 1, '#a87a48'); P(2, y + 11, 60, 1, '#4e321a');
+      for (let g = 0; g < 6; g++) P(5 + (noiseAt(k, g, 61) * 46 | 0), y + 2 + (noiseAt(g, k, 62) * 8 | 0), 5 + (noiseAt(k, g, 63) * 9 | 0), 1, g % 2 ? '#684726' : '#8a6238');
+    }
+    for (let k = 0; k < 48; k++) { P(8 + k, 8 + k, 6, 2, '#5a3d22'); P(8 + k, 8 + k, 6, 1, '#6e4b2a'); }                              // diagonal brace
+    P(2, 2, 60, 6, '#94693c'); P(2, 56, 60, 6, '#6e4b2a'); P(2, 2, 6, 60, '#94693c'); P(56, 2, 6, 60, '#6e4b2a'); P(2, 2, 60, 1, '#b88a52');
+    for (const [cx, cy] of [[2, 2], [51, 2], [2, 51], [51, 51]]) { P(cx, cy, 11, 11, '#8a8fa0'); P(cx, cy, 11, 1, '#c8ccd8'); P(cx + 4, cy + 4, 3, 3, '#4a4f63'); P(cx + 4, cy + 4, 1, 1, '#d8dce6'); }
+    P(24, 40, 16, 2, '#3a2814'); P(24, 44, 10, 2, '#3a2814');
   });
-  F3.propC = {
-    [TILE_CRATE]: mk('#0b0b12', x => crateF(x, 0, 0, 0)),
-    [TILE_GEN]: mk('#0b0b12', x => generatorF(x, 0, 0, 0.3, 1, false)),
-    [TILE_BARREL]: barrel,
-    [TILE_DOOR]: mk('#2c2d33', x => doorF(x, 0, 0, 0)),
-    [TILE_ALARM]: mk('#0b0b12', x => alarmF(x, 0, 0, 0, false, 1)),
-  };
+  const barrel = mk('#8a1f14', P => {
+    P(0, 0, 9, 64, '#5c120b'); P(53, 0, 11, 64, '#4a0e08'); P(15, 0, 6, 64, '#b83a2a'); P(17, 0, 2, 64, '#d86050');
+    for (const y of [9, 30, 51]) { P(0, y, 64, 4, '#3a0a06'); P(0, y, 64, 1, '#a02c1e'); }
+    P(22, 15, 24, 13, '#1b1c22'); for (let k = 0; k < 6; k++) P(23 + k * 4, 16, 2, 11, '#ffd34a');
+    P(28, 37, 12, 10, '#ffd34a'); P(33, 39, 2, 5, '#1b1c22'); P(33, 45, 2, 1, '#1b1c22');
+    P(0, 0, 64, 3, '#2a0805'); P(0, 61, 64, 3, '#2a0805');
+  });
+  const gen = mk('#0b0b12', P => {
+    P(2, 2, 60, 60, '#4a4f63'); P(2, 2, 60, 5, '#7d849c'); P(2, 56, 60, 6, '#33374a'); P(2, 2, 2, 60, '#6a7088'); P(60, 2, 2, 60, '#2e3242');
+    for (let k = 0; k < 6; k++) { P(6, 12 + k * 6, 8, 3, '#22252f'); P(6, 12 + k * 6, 8, 1, '#5d6378'); P(50, 12 + k * 6, 8, 3, '#22252f'); P(50, 12 + k * 6, 8, 1, '#5d6378'); }
+    P(18, 12, 28, 30, '#1b1e2a'); P(20, 14, 24, 26, '#7a1f14'); P(23, 17, 18, 20, '#e0502a'); P(26, 20, 12, 14, '#ff9a4a'); P(29, 23, 6, 8, '#ffe0c8');
+    P(18, 46, 28, 6, '#15171f'); for (let k = 0; k < 5; k++) P(20 + k * 5, 48, 3, 2, k < 3 ? '#6fdc6f' : '#e0b020');
+    for (const [bx, by] of [[4, 8], [58, 8], [4, 54], [58, 54]]) P(bx, by, 2, 2, '#d8dce6');
+  });
+  const door = mk('#2c2d33', (P, x) => {
+    x.save(); x.beginPath(); x.rect(4, 4, 56, 56); x.clip();
+    for (let k = -64; k < 128; k += 16) { x.fillStyle = '#e0b020'; x.beginPath(); x.moveTo(k, 0); x.lineTo(k + 8, 0); x.lineTo(k + 8 - 64, 64); x.lineTo(k - 64, 64); x.fill(); }
+    x.restore();
+    P(0, 0, 64, 4, '#55596b'); P(0, 60, 64, 4, '#1b1c22'); P(0, 0, 4, 64, '#55596b'); P(60, 0, 4, 64, '#1b1c22'); P(31, 4, 2, 56, '#15161c');
+    P(22, 24, 20, 16, '#15161c'); P(24, 26, 16, 12, '#3a3e4e'); P(29, 29, 6, 6, '#ff3b30'); P(30, 30, 2, 2, '#ffd0c8');
+  });
+  const alarm = mk('#0b0b12', P => {
+    P(2, 2, 60, 60, '#3a3e4e'); P(2, 2, 60, 5, '#5d6378'); P(2, 56, 60, 6, '#262a36');
+    P(10, 12, 44, 24, '#15171f'); P(12, 14, 40, 20, '#3a0c0c'); P(24, 16, 16, 16, '#ff3030'); P(27, 19, 10, 10, '#ff8a80'); P(29, 21, 3, 3, '#ffffff');
+    for (let k = 0; k < 4; k++) { P(12 + k * 11, 42, 8, 6, k === 1 ? '#e0b020' : '#55596b'); P(12 + k * 11, 42, 8, 1, '#8d93a8'); }
+  });
+  F3.propC = { [TILE_CRATE]: crate, [TILE_GEN]: gen, [TILE_BARREL]: barrel, [TILE_DOOR]: door, [TILE_ALARM]: alarm };
   return F3.propC;
+}
+// fine grain laid over the floor picture (aoMap: it only darkens): scratches and specks indoors, blades of grass outdoors.
+// The floor itself stays the top-down background (32 px per tile, shared with the 2D view) - this adds detail when seen up close.
+function f3DetailCanvas(field) {
+  const c = mkCanvas(128, 128), x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, 128, 128);
+  for (let k = 0; k < (field ? 1100 : 460); k++) {
+    const a = noiseAt(k, 1, 81) * 128 | 0, b = noiseAt(k, 2, 81) * 128 | 0, n = noiseAt(k, 3, 81);
+    x.fillStyle = `rgba(0,0,0,${field ? 0.1 + n * 0.18 : 0.08 + n * 0.16})`;
+    if (field) x.fillRect(a, b, 1, 2 + (n * 4 | 0)); else x.fillRect(a, b, n < 0.18 ? 6 + (n * 50 | 0) : 1 + (n * 2 | 0), 1);
+  }
+  for (let k = 0; k < 6; k++) { const a = noiseAt(k, 5, 82) * 128, b = noiseAt(k, 6, 82) * 128, r = 10 + noiseAt(k, 7, 82) * 16, g = x.createRadialGradient(a, b, 1, a, b, r); g.addColorStop(0, 'rgba(0,0,0,0.16)'); g.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = g; x.fillRect(a - r, b - r, r * 2, r * 2); }
+  return c;
 }
 const F3_PROP = { [TILE_CRATE]: [1, 13], [TILE_GEN]: [1, 17], [TILE_BARREL]: [3, 13], [TILE_DOOR]: [0, 0], [TILE_ALARM]: [4, 15] };   // [inset, height (0 = wall height)]
 
-// ---------- front-view sprites (the 2D game only has top-down characters) ----------
+// ---------- upright sprites (the 2D game only has top-down characters) ----------
+// drawn in code at 4 px per world unit: view 'f' front / 'b' back / 'r' 'l' side, step 0 / 1 = two frames of the walk
 const _f3Chars = new Map();
 function f3Outline(b) {
   const ol = new PixBuf(b.w, b.h); ol.c = b.c.slice();
@@ -4302,43 +4375,117 @@ function f3Outline(b) {
   }
   return ol.toCanvas();
 }
-function f3CharCanvas(kind, look) {
-  const key = kind + '|' + (look.A || '') + (look.H || '') + (look.V || '') + (look.s || '') + (look.d || '');
-  let c = _f3Chars.get(key); if (c) return c;
-  const dr = kind === 'drone', dg = kind === 'dog', W = dg ? 26 : 28, H = dr ? 16 : dg ? 18 : 36, b = new PixBuf(W, H);
-  const R = (x, y, w, h, col) => { for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) b.set(xx, yy, col); };
-  const E = (cx, cy, rx, ry, base) => {
-    for (let y = Math.floor(cy - ry); y <= cy + ry; y++) for (let x = Math.floor(cx - rx); x <= cx + rx; x++) {
-      const du = (x + 0.5 - cx) / rx, dv = (y + 0.5 - cy) / ry; if (du * du + dv * dv > 1) continue;
-      b.set(x, y, sh(base, du < -0.35 || dv < -0.55 ? 1.18 : du > 0.45 || dv > 0.6 ? 0.72 : 1));
-    }
+// drawing kit on a pixel buffer; light comes from the upper left, four tones
+function f3Art(W, H) {
+  const b = new PixBuf(W, H), tone = n => n > 0.42 ? 1.24 : n > 0.05 ? 1 : n > -0.35 ? 0.8 : 0.62;
+  return {
+    b,
+    B(x, y, w, h, col) { for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) b.set(xx, yy, col); },                 // flat block
+    R(x, y, w, h, base) {                                                                                                                 // shaded box
+      const e = Math.max(1, Math.round(w * 0.2));
+      for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) b.set(x + xx, y + yy, sh(base, xx < e ? 1.2 : xx >= w - e ? 0.7 : yy >= h - 1 ? 0.8 : 1));
+    },
+    E(cx, cy, rx, ry, base) {                                                                                                             // shaded ball
+      for (let y = Math.floor(cy - ry); y <= cy + ry; y++) for (let x = Math.floor(cx - rx); x <= cx + rx; x++) {
+        const du = (x + 0.5 - cx) / rx, dv = (y + 0.5 - cy) / ry; if (du * du + dv * dv > 1) continue;
+        b.set(x, y, sh(base, tone(-(du * 0.55 + dv * 0.65))));
+      }
+    },
+    L(x0, y0, x1, y1, r, base) {                                                                                                          // shaded limb
+      const dx = x1 - x0, dy = y1 - y0, l2 = dx * dx + dy * dy || 1;
+      for (let y = Math.floor(Math.min(y0, y1) - r); y <= Math.max(y0, y1) + r; y++) for (let x = Math.floor(Math.min(x0, x1) - r); x <= Math.max(x0, x1) + r; x++) {
+        const k = Math.max(0, Math.min(1, ((x + 0.5 - x0) * dx + (y + 0.5 - y0) * dy) / l2)), ox = x + 0.5 - (x0 + dx * k), oy = y + 0.5 - (y0 + dy * k);
+        if (ox * ox + oy * oy <= r * r) b.set(x, y, sh(base, tone(-(ox / r * 0.6 + oy / r * 0.45))));
+      }
+    },
   };
-  const A = look.A || '#55596b', Hc = look.H || '#8d93a8', V = look.V || '#55596b', SK = look.s || '#e9b48a';
-  if (dr) {
-    R(1, 3, 10, 1, '#9aa0ac'); R(17, 3, 10, 1, '#9aa0ac'); R(5, 4, 2, 3, '#55596b'); R(21, 4, 2, 3, '#55596b');
-    E(14, 9, 7, 5, '#3a3e4e'); R(9, 12, 10, 1, '#1b1e2a'); R(13, 8, 3, 3, '#ff3b2f'); R(13, 8, 1, 1, '#ffd0c8');
-  } else if (dg) {
-    R(2, 5, 2, 5, look.d || '#5e3a1e'); R(4, 7, 14, 6, A); R(4, 7, 14, 1, sh(A, 1.2)); R(4, 12, 14, 1, sh(A, 0.75));
-    R(16, 2, 7, 7, A); R(16, 0, 2, 3, look.d || '#5e3a1e'); R(21, 0, 2, 3, look.d || '#5e3a1e'); R(22, 5, 3, 3, Hc); R(24, 5, 1, 1, '#15161c'); R(19, 4, 1, 1, '#15161c');
-    for (const x of [5, 8, 13, 16]) R(x, 13, 2, 5, look.d || '#5e3a1e');
-    R(8, 6, 6, 1, '#c0392b');
-  } else if (kind === 'mutant') {
-    R(9, 27, 4, 8, sh(A, 0.6)); R(15, 27, 4, 8, sh(A, 0.5));
-    R(2, 13, 3, 15, sh(A, 0.85)); R(23, 13, 3, 15, sh(A, 0.65));
-    for (const x of [1, 3, 5, 22, 24, 26]) R(x, 28, 1, 3, '#efe6cc');
-    E(14, 19, 8.5, 9.5, A);
-    for (let k = 0; k < 14; k++) { const x = 7 + (noiseAt(k, 3, 5) * 14 | 0), y = 12 + (noiseAt(k, 9, 2) * 14 | 0); if (b.get(x, y)) b.set(x, y, sh(A, 0.7)); }
-    E(14, 8.5, 5.2, 5.2, Hc);
-    R(10, 7, 3, 2, '#ff3b2f'); R(15, 7, 3, 2, '#ff3b2f'); R(11, 7, 1, 1, '#ffd0c8'); R(16, 7, 1, 1, '#ffd0c8'); R(11, 11, 6, 2, '#3a0f0f'); R(12, 11, 1, 1, '#efe6cc'); R(15, 11, 1, 1, '#efe6cc');
+}
+function f3CharCanvas(kind, look, view, step) {
+  view = view || 'f'; step = step ? 1 : 0;
+  const key = [kind, look.A, look.H, look.V, look.s, look.d, view, step].join('|');
+  let c = _f3Chars.get(key); if (c) return c;
+  if (view === 'l') {   // mirror of the right-facing picture
+    const r = f3CharCanvas(kind, look, 'r', step); c = mkCanvas(r.width, r.height);
+    const x = c.getContext('2d'); x.translate(r.width, 0); x.scale(-1, 1); x.drawImage(r, 0, 0);
   } else {
-    R(9, 24, 4, 9, sh(A, 0.7)); R(15, 24, 4, 9, sh(A, 0.58)); R(8, 32, 5, 3, '#1b1c22'); R(15, 32, 5, 3, '#1b1c22');
-    R(7, 11, 14, 14, A); R(7, 11, 3, 14, sh(A, 1.18)); R(18, 11, 3, 14, sh(A, 0.72)); R(10, 12, 8, 5, sh(A, 0.86)); R(7, 23, 14, 2, sh(A, 0.5));
-    E(5.5, 13, 3.2, 3, sh(A, 0.92)); E(22.5, 13, 3.2, 3, sh(A, 0.8));
-    R(3, 15, 3, 6, sh(A, 0.8)); R(22, 15, 3, 6, sh(A, 0.62)); R(4, 19, 7, 3, sh(A, 0.74)); R(17, 19, 7, 3, sh(A, 0.6));
-    R(10, 17, 8, 6, V); R(10, 17, 8, 1, sh(V, 1.3)); R(12, 19, 4, 3, sh(V, 0.35)); R(9, 20, 2, 2, SK); R(17, 20, 2, 2, SK);
-    E(14, 6, 5.4, 5.6, Hc); R(10, 5, 8, 3, '#7fe8ff'); R(10, 8, 8, 1, '#2a6f86'); R(11, 5, 2, 1, '#e8fbff');
+    const A = look.A || '#55596b', Hc = look.H || '#8d93a8', V = look.V || '#55596b', SK = look.s || '#e9b48a', D = look.d || '#5e3a1e';
+    const cl = '#efe6cc', boot = '#1b1c22', red = '#ff3b2f', lift = step ? 4 : 0;
+    let a;
+    if (kind === 'drone') {
+      a = f3Art(56, 32);
+      if (step) { a.B(2, 6, 20, 2, '#9aa0ac'); a.B(34, 6, 20, 2, '#9aa0ac'); } else { a.B(7, 6, 10, 2, '#c8ccd8'); a.B(39, 6, 10, 2, '#c8ccd8'); }
+      a.B(11, 7, 3, 7, '#55596b'); a.B(42, 7, 3, 7, '#55596b'); a.R(9, 13, 38, 4, '#2a2d36');
+      a.E(28, 18, 13, 9, '#4a5160'); a.E(28, 15, 9, 4.5, '#6c7486');
+      a.B(23, 16, 10, 7, '#1b1e2a'); a.B(25, 17, 6, 5, red); a.B(25, 17, 3, 2, '#ffd0c8');
+      a.B(27, 26, 2, 5, '#1b1e2a'); a.B(17, 25, 2, 4, '#2a2d36'); a.B(37, 25, 2, 4, '#2a2d36'); a.B(14, 29, 8, 1, '#2a2d36'); a.B(34, 29, 8, 1, '#2a2d36');
+    } else if (kind === 'dog') {   // always a side view (right)
+      a = f3Art(52, 36); const sw = step ? 3 : 0;
+      a.L(9, 14, 3, 6, 2, D);
+      a.L(14, 22, 13 - sw, 33, 2.6, D); a.L(34, 23, 33 + sw, 33, 2.4, D);
+      a.E(24, 18, 15, 8, A); a.E(25, 22, 10, 3, Hc);
+      a.L(19, 23, 20 + sw, 33, 2.6, sh(A, 0.85)); a.L(38, 22, 40 - sw, 33, 2.4, sh(A, 0.9));
+      a.B(33, 12, 3, 9, '#c0392b'); a.B(33, 12, 1, 9, '#e8604e');
+      a.E(41, 11, 8, 7, A); a.B(36, 2, 3, 7, D); a.B(43, 2, 3, 6, D);
+      a.R(45, 11, 7, 5, Hc); a.B(50, 11, 2, 2, '#15161c'); a.B(46, 15, 4, 1, '#3a0f0f'); a.B(43, 8, 2, 2, '#15161c'); a.B(43, 8, 1, 1, '#ffffff');
+    } else if (kind === 'mutant') {
+      a = f3Art(56, 72);
+      const spots = (x0, x1) => { for (let k = 0; k < 44; k++) { const x = x0 + (noiseAt(k, 3, 5) * (x1 - x0) | 0), y = 23 + (noiseAt(k, 9, 2) * 30 | 0); if (a.b.get(x, y)) a.B(x, y, 1 + (k % 2), 1 + (k % 3 ? 0 : 1), sh(A, 0.68)); } };
+      if (view === 'r') {
+        a.L(23, 52, 20, 67 - lift, 4, sh(A, 0.6)); a.B(17, 68 - lift, 10, 3, sh(A, 0.42));
+        a.L(29, 52, 33, 63 + lift, 4, sh(A, 0.74)); a.B(31, 64 + lift, 10, 3, sh(A, 0.5));
+        a.E(26, 37, 11, 17, A); spots(16, 36);
+        for (let k = 0; k < 6; k++) a.B(15 + (k > 2 ? 1 : 0), 26 + k * 4, 2, 2, sh(A, 0.5));                    // spine
+        a.E(33, 17, 9, 9.5, Hc); a.B(27, 9, 8, 2, sh(Hc, 0.72));
+        a.B(37, 14, 5, 4, red); a.B(39, 14, 2, 1, '#ffd0c8'); a.B(36, 21, 7, 3, '#3a0f0f'); a.B(38, 21, 1, 2, cl); a.B(41, 21, 1, 2, cl);
+        a.L(27, 29, 37, 49, 3.6, sh(A, 0.9)); for (let k = 0; k < 3; k++) a.B(36 + k * 2, 51, 1, 5, cl);
+      } else {
+        a.L(22, 52, 20, 67 - lift, 4.2, sh(A, 0.62)); a.B(15, 68 - lift, 10, 3, sh(A, 0.42));
+        a.L(34, 52, 36, 63 + lift, 4.2, sh(A, 0.55)); a.B(32, 64 + lift, 10, 3, sh(A, 0.42));
+        a.L(12, 28, 7, 52, 3.8, sh(A, 0.9)); a.L(44, 28, 49, 52, 3.8, sh(A, 0.72));
+        for (let k = 0; k < 3; k++) { a.B(3 + k * 2, 54, 1, 5, cl); a.B(47 + k * 2, 54, 1, 5, cl); }
+        a.E(28, 38, 14.5, 17, A); a.E(13, 27, 6, 5, sh(A, 1.05)); a.E(43, 27, 6, 5, sh(A, 0.9));
+        if (view === 'f') { a.E(28, 43, 8, 9, sh(A, 1.1)); for (let k = 0; k < 3; k++) a.B(23, 38 + k * 4, 10, 1, sh(A, 0.78)); }
+        spots(15, 42);
+        if (view === 'b') for (let k = 0; k < 7; k++) a.B(27, 26 + k * 4, 2, 2, sh(A, 0.5));
+        a.E(28, 16, 10, 10, Hc);
+        if (view === 'f') {
+          a.B(20, 11, 16, 2, sh(Hc, 0.68));
+          a.B(20, 14, 6, 4, red); a.B(30, 14, 6, 4, red); a.B(21, 14, 2, 1, '#ffd0c8'); a.B(31, 14, 2, 1, '#ffd0c8'); a.B(23, 15, 2, 2, '#7a0f0a'); a.B(33, 15, 2, 2, '#7a0f0a');
+          a.B(22, 21, 12, 4, '#3a0f0f'); for (const x of [23, 27, 31]) a.B(x, 21, 2, 2, cl); a.B(25, 23, 2, 2, cl); a.B(29, 23, 2, 2, cl);
+        } else { a.B(23, 8, 10, 2, sh(Hc, 0.75)); a.B(27, 10, 2, 13, sh(Hc, 0.7)); }
+      }
+    } else {   // soldier
+      a = f3Art(56, 72);
+      if (view === 'r') {
+        a.R(22, 46, 6, 20 - lift, sh(A, 0.6)); a.B(21, 66 - lift, 10, 4, boot);
+        a.R(28, 46, 6, 16 + lift, sh(A, 0.74)); a.B(28, 62 + lift, 10, 4, boot);
+        a.R(13, 24, 8, 18, sh(A, 0.6)); a.B(13, 32, 8, 1, sh(A, 0.4));                                           // backpack
+        a.R(20, 22, 14, 26, A); a.B(20, 44, 14, 3, sh(A, 0.45)); a.R(24, 37, 6, 6, sh(A, 0.8));
+        a.B(25, 20, 6, 3, sh(SK, 0.8));
+        a.E(28, 13, 9, 9, Hc); a.B(31, 10, 7, 6, '#7fe8ff'); a.B(31, 15, 7, 1, '#2a6f86'); a.B(32, 10, 2, 1, '#e8fbff'); a.B(21, 17, 12, 2, sh(Hc, 0.65));
+        a.R(24, 30, 8, 6, sh(V, 0.72)); a.R(30, 31, 22, 4, V); a.B(50, 32, 4, 2, sh(V, 0.35)); a.B(36, 35, 3, 6, sh(V, 0.6)); a.B(40, 29, 6, 2, sh(V, 0.8));
+        a.L(25, 27, 36, 34, 3, sh(A, 0.86)); a.E(38, 34, 2.6, 2.6, SK);
+      } else {
+        a.R(19, 46, 8, 20 - lift, sh(A, 0.68)); a.B(18, 66 - lift, 10, 4, boot);
+        a.R(29, 46, 8, 16 + lift, sh(A, 0.58)); a.B(28, 62 + lift, 10, 4, boot);
+        a.R(8, 28, 6, 14, sh(A, 0.82)); a.R(42, 28, 6, 14, sh(A, 0.66));
+        a.R(15, 22, 26, 26, A); a.E(13, 25, 6, 5.5, sh(A, 0.95)); a.E(43, 25, 6, 5.5, sh(A, 0.8));
+        a.B(15, 44, 26, 3, sh(A, 0.45)); a.B(26, 44, 4, 3, '#9aa0ac');
+        if (view === 'f') {
+          a.R(19, 25, 18, 11, sh(A, 0.86)); a.B(27, 26, 2, 9, sh(A, 0.6)); a.R(17, 38, 6, 5, sh(A, 0.75)); a.R(33, 38, 6, 5, sh(A, 0.7));
+          a.L(11, 41, 22, 38, 3, sh(A, 0.78)); a.L(45, 41, 34, 38, 3, sh(A, 0.62));
+          a.R(21, 32, 14, 10, V); a.B(25, 35, 6, 5, sh(V, 0.3)); a.B(27, 36, 2, 3, '#000000'); a.E(21, 39, 2.6, 2.6, SK); a.E(35, 39, 2.6, 2.6, SK);
+          a.E(28, 13, 10.5, 10.5, Hc); a.B(20, 10, 16, 6, '#7fe8ff'); a.B(20, 15, 16, 2, '#2a6f86'); a.B(22, 10, 4, 2, '#e8fbff'); a.B(23, 19, 10, 3, sh(Hc, 0.72));
+        } else {
+          a.R(18, 24, 20, 18, sh(A, 0.6)); a.B(18, 32, 20, 1, sh(A, 0.4)); a.R(24, 27, 8, 5, sh(A, 0.78));
+          a.E(11, 43, 2.6, 2.6, SK); a.E(45, 43, 2.6, 2.6, SK);
+          a.E(28, 13, 10.5, 10.5, Hc); a.B(20, 17, 16, 2, sh(Hc, 0.62)); a.B(37, 0, 1, 8, '#9aa0ac');
+        }
+      }
+    }
+    c = f3Outline(a.b);
   }
-  c = f3Outline(b); _f3Chars.set(key, c); return c;
+  c.ppu = 4; _f3Chars.set(key, c); return c;
 }
 function f3IconCanvas(name) {
   F3.icons = F3.icons || {};
@@ -4367,6 +4514,7 @@ function f3Mesh(g, map, extra) {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(g.p, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(g.u, 2));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(g.c, 3));
+  if (g.u2) geo.setAttribute('uv2', new THREE.Float32BufferAttribute(g.u2, 2));   // second uv set (aoMap)
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial(Object.assign({ map, vertexColors: true, side: THREE.DoubleSide }, extra || {})));
   mesh.frustumCulled = false;
   return mesh;
@@ -4381,12 +4529,14 @@ function f3Box(g, x0, z0, x1, z1, h, top) {
   if (top) f3Quad(g, [x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], 1.12);
 }
 function f3BuildWalls(m) {
-  const { W, H, tiles } = m, g = f3Geo(), fld = !!m.field, h = fld ? 20 : F3.wallH;
+  const { W, H, tiles } = m, gs = [f3Geo(), f3Geo(), f3Geo(), f3Geo()], fld = !!m.field, h = fld ? 20 : F3.wallH;
+  let g = gs[0];
   // ground missions: only building walls are boxes (trees and rocks are drawn by f3BuildField)
   const solid = (i, j) => tiles[j * W + i] === TILE_WALL && (!fld || m.deco[j * W + i] === W_BLD);
   const open = (i, j) => i >= 0 && j >= 0 && i < W && j < H && !solid(i, j);
   for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
     if (!solid(i, j)) continue;
+    const nv = noiseAt(i, j, 41); g = gs[nv < 0.44 ? 0 : nv < 0.68 ? 2 : nv < 0.88 ? 1 : 3];   // which wall picture this tile gets
     const x0 = i * T, x1 = x0 + T, z0 = j * T, z1 = z0 + T;
     if (fld) f3Quad(g, [x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], 0.55);   // top (seen from the helicopter)
     // soft shading: darker near the floor and where the wall meets another wall (ad / bc = is that end an inner corner?)
@@ -4396,9 +4546,9 @@ function f3BuildWalls(m) {
     if (open(i - 1, j)) face([x0, 0, z0], [x0, 0, z1], [x0, h, z1], [x0, h, z0], 0.76, !open(i - 1, j - 1), !open(i - 1, j + 1));
     if (open(i + 1, j)) face([x1, 0, z1], [x1, 0, z0], [x1, h, z0], [x1, h, z1], 0.76, !open(i + 1, j + 1), !open(i + 1, j - 1));
   }
-  if (F3.walls) { F3.scene.remove(F3.walls); F3.walls.geometry.dispose(); F3.walls.material.dispose(); }
-  F3.walls = f3Mesh(g, f3Tex(F3.wallC, true));
-  F3.scene.add(F3.walls);
+  (F3.walls || []).forEach(o => { F3.scene.remove(o); o.geometry.dispose(); o.material.dispose(); });
+  F3.walls = [];
+  gs.forEach((q, v) => { if (!q.p.length) return; const me = f3Mesh(q, f3Tex(F3.wallCs[v], true)); F3.walls.push(me); F3.scene.add(me); });
 }
 function f3BuildProps(m) {
   const { W, H, tiles } = m, pc = f3PropCanvases();
@@ -4426,14 +4576,22 @@ function f3PixArt(W, H, fn) {
   return f3Outline(b);
 }
 function f3TreeCanvas() {
-  return F3.treeC || (F3.treeC = f3PixArt(44, 76, (R, E, b) => {
-    R(19, 52, 6, 24, '#5a3d22'); R(19, 52, 2, 24, '#7a5530'); R(24, 52, 1, 24, '#3e2a16');
-    E(22, 46, 20, 14, '#1f3a1b'); E(22, 34, 18, 15, '#2c5126'); E(21, 22, 14, 13, '#335a29'); E(20, 12, 9, 9, '#3d6a32');
-    for (let k = 0; k < 46; k++) { const x = 4 + (noiseAt(k, 3, 61) * 36 | 0), y = 4 + (noiseAt(k, 7, 62) * 52 | 0); if (b.get(x, y)) b.set(x, y, k % 3 ? '#5a8a44' : '#18301a'); }
-  }));
+  if (F3.treeC) return F3.treeC;
+  const a = f3Art(88, 152);
+  a.R(38, 100, 12, 52, '#5a3d22'); for (let k = 0; k < 9; k++) a.B(40 + (k * 5) % 8, 104 + k * 5, 1, 4, '#3e2a16');
+  a.L(44, 112, 30, 96, 2.5, '#5a3d22'); a.L(44, 108, 60, 94, 2.5, '#4e351d');
+  a.E(44, 92, 40, 26, '#1f3a1b'); a.E(28, 74, 26, 24, '#27481f'); a.E(60, 72, 26, 24, '#2c5126'); a.E(44, 54, 31, 28, '#2f5627'); a.E(38, 32, 22, 22, '#335a29'); a.E(46, 16, 14, 14, '#3d6a32');
+  for (let k = 0; k < 190; k++) { const x = 4 + (noiseAt(k, 3, 61) * 80 | 0), y = 4 + (noiseAt(k, 7, 62) * 112 | 0); if (a.b.get(x, y)) a.B(x, y, 2, 1 + (k % 2), k % 3 ? (k % 2 ? '#5a8a44' : '#4a7a3a') : '#18301a'); }
+  return F3.treeC = f3Outline(a.b);
 }
 function f3RockCanvas() {
-  return F3.rockC || (F3.rockC = f3PixArt(40, 30, (R, E) => { E(20, 18, 18, 11, '#5c5f63'); E(16, 15, 12, 8, '#7a7e83'); E(13, 11, 5, 3, '#9a9ea3'); R(24, 20, 6, 1, '#3e4042'); R(9, 22, 5, 1, '#3e4042'); }));
+  if (F3.rockC) return F3.rockC;
+  const a = f3Art(80, 60);
+  a.E(40, 37, 37, 22, '#5c5f63'); a.E(29, 31, 23, 16, '#74787d'); a.E(54, 41, 17, 11, '#676b70'); a.E(23, 23, 9, 6, '#9a9ea3');
+  for (let k = 0, x = 44, y = 20; k < 9; k++) { a.B(x, y, 2, 3, '#3e4042'); x += k % 2 ? 3 : -1; y += 3; }
+  a.B(14, 46, 12, 2, '#3e4042'); a.B(58, 50, 9, 2, '#3e4042');
+  for (let k = 0; k < 16; k++) { const x = 8 + (noiseAt(k, 2, 66) * 62 | 0), y = 44 + (noiseAt(k, 4, 67) * 12 | 0); if (a.b.get(x, y)) a.B(x, y, 3, 2, k % 2 ? '#3f5f2f' : '#47693a'); }
+  return F3.rockC = f3Outline(a.b);
 }
 // two crossed upright quads: a cheap tree / rock that looks solid from every side (one draw call for the whole forest)
 function f3Cross(g, cx, cz, w, h, rot, k) {
@@ -4495,17 +4653,20 @@ function f3Build(m) {
   F3.floorTex = new THREE.CanvasTexture(m.bg);
   F3.floorTex.magFilter = THREE.NearestFilter; F3.floorTex.minFilter = THREE.LinearMipmapLinearFilter; F3.floorTex.anisotropy = Math.min(8, F3.r.capabilities.getMaxAnisotropy());
   let g = f3Geo(); f3Quad(g, [0, 0, Ht], [Wt, 0, Ht], [Wt, 0, 0], [0, 0, 0], 1);
-  sc.add(f3Mesh(g, F3.floorTex));
+  // + fine grain repeating every 2 tiles (aoMap on a second uv set) so the floor does not look blurred up close
+  const du = m.W / 2, dv = m.H / 2; g.u2 = [0, 0, du, 0, du, dv, 0, 0, du, dv, 0, dv];
+  const dt = new THREE.CanvasTexture(f3DetailCanvas(fld)); dt.wrapS = dt.wrapT = THREE.RepeatWrapping; dt.magFilter = THREE.NearestFilter; dt.anisotropy = F3.floorTex.anisotropy;
+  sc.add(f3Mesh(g, F3.floorTex, { aoMap: dt, aoMapIntensity: 1 }));
   // soft round shadows under characters and items: one instanced mesh lying on the floor
   if (!F3.shadowC) { const c = F3.shadowC = mkCanvas(64, 64), x = c.getContext('2d'), gr = x.createRadialGradient(32, 32, 2, 32, 32, 32); gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(0.6, 'rgba(0,0,0,0.3)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = gr; x.fillRect(0, 0, 64, 64); }
   F3.shadow = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(F3.shadowC), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }), F3_SHADOW_MAX);
   F3.shadow.frustumCulled = false; F3.shadow.count = 0; sc.add(F3.shadow);
   if (!fld) {   // ceiling
-    const ct = new THREE.CanvasTexture(f3CeilCanvas(th)); ct.wrapS = ct.wrapT = THREE.RepeatWrapping; ct.magFilter = THREE.NearestFilter;
+    const ct = new THREE.CanvasTexture(f3CeilCanvas(th, m.night)); ct.wrapS = ct.wrapT = THREE.RepeatWrapping; ct.magFilter = THREE.NearestFilter;
     g = f3Geo(); f3Quad(g, [0, F3.wallH, Ht], [Wt, F3.wallH, Ht], [Wt, F3.wallH, 0], [0, F3.wallH, 0], 1, m.W, m.H);
     sc.add(f3Mesh(g, ct));
   }
-  F3.wallC = f3WallCanvas(th);
+  F3.wallCs = [0, 1, 2, 3].map(v => f3WallCanvas(th, v));
   f3BuildWalls(m); f3BuildProps(m);
   if (fld) f3BuildField(m);
   F3.snap = m.tiles.slice();
@@ -4579,7 +4740,8 @@ function f3Sprite(c, x, h, y, scale, tint) {
   F3.sn++;
   const t = f3Tex(c); if (s.material.map !== t) s.material.map = t;
   s.material.color.set(tint || 0xffffff);
-  s.scale.set(c.width / RS * scale, c.height / RS * scale, 1);
+  const ppu = c.ppu || RS;   // picture pixels per world unit
+  s.scale.set(c.width / ppu * scale, c.height / ppu * scale, 1);
   s.position.set(x, h, y); s.visible = true;
 }
 // world point -> overlay canvas coordinates (null when behind the camera)
@@ -4661,10 +4823,17 @@ function f3Render(ctx, m, t, dt) {
     const dx = o.x - p.x, dy = o.y - p.y, d = Math.hypot(dx, dy); if (d >= min) return o;
     return d > 0.5 ? { x: p.x + dx / d * min, y: p.y + dy / d * min } : { x: p.x + Math.cos(F3.yaw) * min, y: p.y + Math.sin(F3.yaw) * min };
   };
+  // which side of a character the camera sees: front when it faces the player, back when it faces away, else left / right on screen
+  const rx = -Math.sin(F3.yaw), ry = Math.cos(F3.yaw);
+  const side = ang => Math.cos(ang) * rx + Math.sin(ang) * ry > 0 ? 'r' : 'l';
+  const view = (ang, o) => { const d = Math.abs(((ang - Math.atan2(p.y - o.y, p.x - o.x) + Math.PI * 3) % (Math.PI * 2)) - Math.PI); return d < 0.8 ? 'f' : d > 2.35 ? 'b' : side(ang); };
   const unit = (e, ally) => {
     if (e.hidden) return;
     const d = e.d, k = d.kind;
-    let c = f3CharCanvas(k, d.look || {}); if (e.flash > 0) c = whiteOf(c);
+    if (e._x3 !== undefined && Math.hypot(e.x - e._x3, e.y - e._y3) > 0.04) e._w3 = (e._w3 || 0) + (F3.dt || 0);   // the walk only advances while it moves
+    e._x3 = e.x; e._y3 = e.y;
+    const base = k === 'drone' ? f3CharCanvas(k, d.look || {}, 'f', (t * 20 | 0) & 1) : f3CharCanvas(k, d.look || {}, view(e.ang, e), ((e._w3 || 0) * 5 | 0) & 1);
+    let c = base; if (e.flash > 0) { c = whiteOf(base); c.ppu = base.ppu; }
     const s = Math.min(1.5, d.scale || 1) * 0.8;
     const fuse = e.fuseT !== undefined && (t * 12 | 0) % 2;
     const q = near(e, 14 * Math.max(1, s));
@@ -4675,7 +4844,8 @@ function f3Render(ctx, m, t, dt) {
   m.enemies.forEach(e => unit(e, false));
   if (m.dog && !m.dog.hidden && m.state !== 'dead') {
     const f = (typeof DOG_FURS !== 'undefined' && S.dog && DOG_FURS[S.dog.fur]) || { base: '#8a5a32', dark: '#5e3a1e', light: '#c89a6a' };
-    f3Sprite(f3CharCanvas('dog', { A: f.base, H: f.light, d: f.dark }), near(m.dog, 20).x, 0, near(m.dog, 20).y, 0.8); f3Shade(near(m.dog, 20).x, near(m.dog, 20).y, 11);
+    const dg = m.dog, dq = near(dg, 20);
+    f3Sprite(f3CharCanvas('dog', { A: f.base, H: f.light, d: f.dark }, side(dg.ang), dg.moving ? (t * 8 | 0) & 1 : 0), dq.x, 0, dq.y, 0.8); f3Shade(dq.x, dq.y, 11);
   }
   m.pickups.forEach(o => {
     const c = o.type === 'key' ? f3IconCanvas('key') : o.type === 'mod' ? f3IconCanvas('mod') : iconSpriteHi('icon', o.type === 'gear' ? 'lootbox' : o.type === 'med' ? 'medkit' : o.type);
