@@ -1291,8 +1291,13 @@ function refreshOffers(force) {
 // ===================================================================
 // audio.js - tiny synthesized sound effects (no files)
 // ===================================================================
+// positional sound: half = distance where it is half as loud, far = not heard beyond, wall = low-pass (Hz) behind walls,
+// behind = low-pass for sounds behind the player in first person, pan = how far left / right (0..1)
+const SFX_POS = { half: 110, far: 700, wall: 900, wallVol: 0.7, behind: 3200, pan: 0.85 };
 const SFX = (() => {
-  let ac = null, master = null, noiseBuf = null, last = {};
+  let ac = null, master = null, noiseBuf = null, last = {}, out = null;   // out: where the current sound goes (master, or a positional chain)
+  // listener (set by the main loop during a mission): position, view direction, first person or top-down
+  const ear = { m: null, x: 0, y: 0, yaw: 0, fp: false };
   function init() {
     if (ac) { if (ac.state !== 'running') { try { ac.resume(); } catch (e) { } } return; }   // iOS: 'suspended' / 'interrupted'
     try {
@@ -1307,13 +1312,30 @@ const SFX = (() => {
     const t = ac.currentTime, src = ac.createBufferSource(), flt = ac.createBiquadFilter(), g = ac.createGain();
     src.buffer = noiseBuf; flt.type = type || 'lowpass'; flt.frequency.setValueAtTime(f0, t); flt.frequency.exponentialRampToValueAtTime(Math.max(40, f1), t + dur);
     g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    src.connect(flt); flt.connect(g); g.connect(master); src.start(t); src.stop(t + dur);
+    src.connect(flt); flt.connect(g); g.connect(out || master); src.start(t); src.stop(t + dur);
   }
   function tone(f0, f1, dur, vol, type, delay) {
     const t = ac.currentTime + (delay || 0), o = ac.createOscillator(), g = ac.createGain();
     o.type = type || 'square'; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
     g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    o.connect(g); g.connect(master); o.start(t); o.stop(t + dur);
+    o.connect(g); g.connect(out || master); o.start(t); o.stop(t + dur);
+  }
+  // a sound coming from world point (x, y): quieter with distance, panned left / right, muffled behind walls (and a little when
+  // behind the player in first person). Returns the input node of the chain, or null when it is too far to hear.
+  function spatial(x, y) {
+    const dx = x - ear.x, dy = y - ear.y, d = Math.hypot(dx, dy);
+    if (d > SFX_POS.far) return null;
+    let vol = 1 / (1 + d / SFX_POS.half), pan, cut = 0;
+    if (ear.fp) {
+      pan = d > 4 ? (dx * -Math.sin(ear.yaw) + dy * Math.cos(ear.yaw)) / d : 0;
+      if (d > 4 && (dx * Math.cos(ear.yaw) + dy * Math.sin(ear.yaw)) / d < -0.25) cut = SFX_POS.behind;
+    } else pan = Math.max(-1, Math.min(1, dx / 220));
+    if (ear.m && d > 24 && typeof losClear === 'function' && !losClear(ear.m, ear.x, ear.y, x, y)) { cut = SFX_POS.wall; vol *= SFX_POS.wallVol; }
+    const g = ac.createGain(); g.gain.value = vol;
+    let head = g;
+    if (cut) { const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cut; f.connect(g); head = f; }
+    if (ac.createStereoPanner) { const p = ac.createStereoPanner(); p.pan.value = pan * SFX_POS.pan; g.connect(p); p.connect(master); } else g.connect(master);
+    return head;
   }
   const defs = {
     pistol: () => { noise(0.09, 3000, 400, 0.5); tone(300, 80, 0.06, 0.15); },
@@ -1345,13 +1367,17 @@ const SFX = (() => {
   };
   return {
     init,
-    play(name, minGap) {
+    // x, y (optional): where in the mission the sound comes from (see spatial). Without them it plays in the middle (UI, own weapon).
+    play(name, minGap, x, y) {
       if (!on() || !defs[name]) return;
       const now = performance.now();
       if (minGap && last[name] && now - last[name] < minGap) return;
+      if (x !== undefined && ear.m) { try { out = spatial(x, y); } catch (e) { out = null; } if (!out) return; }
       last[name] = now;
       try { defs[name](); } catch (e) { }
+      out = null;
     },
+    ear(m, x, y, yaw, fp) { ear.m = m || null; if (m) { ear.x = x; ear.y = y; ear.yaw = yaw; ear.fp = !!fp; } },
     suspend(b) { if (ac) { b ? ac.suspend() : ac.resume(); } },
   };
 })();
@@ -1614,7 +1640,7 @@ function fire(m, ang) {
     for (let d = 0; d < st.range; d += 3) {
       x = mx + Math.cos(ang) * d; y = my + Math.sin(ang) * d; ex = x; ey = y;
       const t = tileAt(m, x, y);
-      if (t === TILE_WALL || t === TILE_DOOR) break;
+      if (t === TILE_WALL || t === TILE_DOOR) { if (t === TILE_WALL) wallMark(m, mx + Math.cos(ang) * (d - 3), my + Math.sin(ang) * (d - 3), x, y, 'burn'); break; }
       if (t !== TILE_FLOOR) { damageTile(m, x, y, st.dmg * ps.dmgMul); break; }
       m.enemies.slice().forEach(e => { if (!hit.has(e) && (e.x - x) ** 2 + (e.y - y) ** 2 < (e.r + 2) ** 2) { hit.add(e); const c = crit(); damageEnemy(m, e, st.dmg * ps.dmgMul * (c ? 2 : 1), ang, c, st); } });
     }
@@ -1647,12 +1673,29 @@ function damageEnemy(m, e, dmg, ang, crit, opts) {
   if (silent && e.state === 'sleep') dmg *= 1 + silent;
   if (opts && opts.burn) { e.burnDps = Math.max(e.burnT > 0 ? e.burnDps : 0, dmg * opts.burn); e.burnT = MOD_BURN_TIME; }
   e.hp -= dmg; e.flash = 0.08; e.state = 'chase';
+  if (e.d.kind !== 'drone' && Math.random() < 0.55) wallRay(m, e.x, e.y, ang + (Math.random() - 0.5) * 0.6, 20, 'blood');   // first person: blood on the wall behind
   const kb = e.d.heavy ? 0 : e.d.scale ? 0.5 : 1.5; moveCircle(m, e, Math.cos(ang) * kb, Math.sin(ang) * kb);   // knockback respects walls
   addFloat(m, e.x, e.y - 8, Math.round(dmg), crit ? '#ffd34a' : '#ffffff');
-  SFX.play('hit', 50);
+  SFX.play('hit', 50, e.x, e.y);
   if (e.hp <= 0) killEnemy(m, e);
   // wake neighbours
   if (!silent) m.enemies.forEach(o => { if (o.state === 'sleep' && (o.x - e.x) ** 2 + (o.y - e.y) ** 2 < 80 * 80) o.state = 'chase'; });
+}
+// first person only: marks for fps3d.js to stick on wall faces. (x0, y0) = last point in the open, (x1, y1) = point inside the wall
+function wallMark(m, x0, y0, x1, y1, kind) {
+  if (!m.fp) return;
+  const a = m.marks || (m.marks = []); if (a.length < 80) a.push({ x0, y0, x1, y1, kind });
+}
+// first person only: from (x, y) along ang, the first wall within len -> a mark
+function wallRay(m, x, y, ang, len, kind) {
+  if (!m.fp) return;
+  let px = x, py = y;
+  for (let d = 2; d <= len; d += 2) {
+    const qx = x + Math.cos(ang) * d, qy = y + Math.sin(ang) * d, t = tileAt(m, qx, qy);
+    if (t === TILE_WALL) { wallMark(m, px, py, qx, qy, kind); return; }
+    if (t !== TILE_FLOOR) return;
+    px = qx; py = qy;
+  }
 }
 function killEnemy(m, e) {
   const i = m.enemies.indexOf(e); if (i < 0) return;
@@ -1662,7 +1705,7 @@ function killEnemy(m, e) {
   m.kills++; if (!e.minion) m.gained.xp += Math.round(e.d.xp * (1 + 0.1 * (m.L - 1)));
   puff(m, e.x, e.y, 10, e.type === 'brute' ? ['#55606e', '#2a2f36', '#8a2020'] : ['#8a2020', '#5e1414', '#4f8a3a'], 50, 0.4);
   splat(m, e.x, e.y, e.d.kind === 'mutant' ? '#3d5e2a' : '#5e1414', 14);
-  SFX.play('die', 60);
+  SFX.play('die', 60, e.x, e.y);
   const r = e.minion ? 1 : Math.random();   // boss minions drop nothing
   if (r < 0.65) m.pickups.push({ type: 'credit', x: e.x, y: e.y, val: Math.round(e.d.cr * (0.7 + Math.random() * 0.6) * (1 + 0.15 * (m.L - 1))), bob: 0 });
   else if (r < 0.75) m.pickups.push({ type: 'med', x: e.x, y: e.y, bob: 0 });
@@ -1679,7 +1722,7 @@ function damageTile(m, x, y, dmg) {
   if (t === TILE_CRATE) {
     m.crateHp[k] -= dmg;
     if (m.crateHp[k] <= 0) {
-      m.tiles[k] = TILE_FLOOR; puff(m, i * T + 8, j * T + 8, 10, ['#8a6136', '#5a3d22', '#b08250'], 45, 0.5); SFX.play('hit');
+      m.tiles[k] = TILE_FLOOR; puff(m, i * T + 8, j * T + 8, 10, ['#8a6136', '#5a3d22', '#b08250'], 45, 0.5); SFX.play('hit', 0, i * T + 8, j * T + 8);
       if (Math.random() < 0.35) m.pickups.push({ type: 'credit', x: i * T + 8, y: j * T + 8, val: 8 + m.L * 3, bob: 0 });
       else if (Math.random() < 0.15) m.pickups.push({ type: 'med', x: i * T + 8, y: j * T + 8, bob: 0 });
       m.flowT = 0;
@@ -1689,7 +1732,7 @@ function damageTile(m, x, y, dmg) {
     if (m.crateHp[k] <= 0) { m.tiles[k] = TILE_FLOOR; m.booms.push({ x: i * T + 8, y: j * T + 8, t: 0.12 }); m.flowT = 0; }
   } else if (t === TILE_ALARM) {
     m.crateHp[k] -= dmg; addFloat(m, i * T + 8, j * T, Math.round(dmg), '#ff9a6b');
-    if (m.crateHp[k] <= 0) { m.tiles[k] = TILE_FLOOR; puff(m, i * T + 8, j * T + 8, 12, ['#8a8fa0', '#ff5050', '#ffd34a'], 50, 0.5); SFX.play('hit'); m.flowT = 0; alarmOff(m, '파괴'); }
+    if (m.crateHp[k] <= 0) { m.tiles[k] = TILE_FLOOR; puff(m, i * T + 8, j * T + 8, 12, ['#8a8fa0', '#ff5050', '#ffd34a'], 50, 0.5); SFX.play('hit', 0, i * T + 8, j * T + 8); m.flowT = 0; alarmOff(m, '파괴'); }
   } else if (t === TILE_GEN) {
     const g = m.gens.find(o => o.tx === i && o.ty === j); if (!g) return;
     g.hp -= dmg; g.flash = 0.08; addFloat(m, i * T + 8, j * T, Math.round(dmg), '#ff9a6b');
@@ -1754,7 +1797,7 @@ function grenadeAimTarget(m, fx, fy, kind) {
 }
 function flashBang(m, x, y) {
   const F = SUPPLIES.flash, p = m.player;
-  SFX.play('flash');
+  SFX.play('flash', 0, x, y);
   m.fx = m.fx || [];
   m.fx.push({ k: 'flash', x, y, t: 0.3, T: 0.3, r: F.rad * 1.6 });
   m.fx.push({ k: 'ring', x, y, t: 0.45, T: 0.45, r0: 4, r1: F.rad, thin: true });
@@ -1774,7 +1817,7 @@ function updateGrenades(m, dt) {
     g.t += dt; const k = Math.min(1, g.t / g.T);
     g.x = g.x0 + (g.x1 - g.x0) * k; g.y = g.y0 + (g.y1 - g.y0) * k; g.z = Math.sin(k * Math.PI) * g.H;
     if (k < 1) return true;
-    if (!g.landed) { g.landed = true; SFX.play('click'); }
+    if (!g.landed) { g.landed = true; SFX.play('click', 0, g.x, g.y); }
     g.fuse -= dt;
     if (g.fuse > 0) return true;
     if (g.kind === 'flash') flashBang(m, g.x, g.y); else if (g.kind === 'flare') lightFlare(m, g.x, g.y); else explode(m, g.x, g.y, GRENADE.rad, g.dmg);
@@ -1791,7 +1834,7 @@ function placeMine(m) {
 function updateMines(m, dt) {
   const D = SUPPLIES.mine;
   m.mines = m.mines.filter(o => {
-    if (o.arm > 0) { o.arm -= dt; if (o.arm <= 0) SFX.play('beep'); return true; }
+    if (o.arm > 0) { o.arm -= dt; if (o.arm <= 0) SFX.play('beep', 0, o.x, o.y); return true; }
     const hit = m.enemies.find(e => !e.d.fly && !e.remote && Math.hypot(e.x - o.x, e.y - o.y) < D.trig + e.r);
     if (!hit) return true;
     explode(m, o.x, o.y, D.rad, o.dmg);
@@ -1824,7 +1867,7 @@ function updateBomber(m, e, dt, dist) {
     if (e.fuseT <= 0) killEnemy(m, e);
     return true;
   }
-  if (dist < b.trig + p.r && losClear(m, e.x, e.y, p.x, p.y)) { e.fuseT = b.fuse * fpBal(m, 'bomberFuse'); SFX.play('beep'); return true; }
+  if (dist < b.trig + p.r && losClear(m, e.x, e.y, p.x, p.y)) { e.fuseT = b.fuse * fpBal(m, 'bomberFuse'); SFX.play('beep', 0, e.x, e.y); return true; }
   return false;
 }
 function bomberBlast(m, e) {
@@ -1845,7 +1888,7 @@ function updateSniper(m, e, dt, dx, dy, dist) {
     if (e.aimT <= 0) {
       const a = e.ang, mz = 9;
       m.bullets.push({ x: e.x + Math.cos(a) * mz, y: e.y + Math.sin(a) * mz, vx: Math.cos(a) * s.speed, vy: Math.sin(a) * s.speed, dmg: s.dmg * e.dmgMul, life: 1.2, from: 'e', snipe: true });
-      SFX.play('snipe'); e.shootT = s.cd * (0.85 + Math.random() * 0.3);
+      SFX.play('snipe', 0, e.x, e.y); e.shootT = s.cd * (0.85 + Math.random() * 0.3);
     } else if (!see && e.aimT > s.lock) e.aimT = 0;                    // lost sight while still tracking
   } else if (see) {
     e.ang = Math.atan2(dy, dx);
@@ -1872,7 +1915,7 @@ function updateDrone(m, e, dt, dx, dy, dist) {
     const a = e.ang + (Math.random() - 0.5) * 0.12, mx = e.x + Math.cos(a) * 7, my = e.y + Math.sin(a) * 7;
     if (!solidPx(m, mx, my) && losClear(m, mx, my, m.player.x, m.player.y)) {
       m.bullets.push({ x: mx, y: my, vx: Math.cos(a) * g.speed, vy: Math.sin(a) * g.speed, dmg: g.dmg * e.dmgMul, life: 1.6, from: 'e' });
-      SFX.play('enemyShot', 80);
+      SFX.play('enemyShot', 80, e.x, e.y);
       e.shootT = 1 / g.rate * (0.8 + Math.random() * 0.5);
     } else e.shootT = 0.25;
   }
@@ -1899,7 +1942,8 @@ function drawDrone(ctx, e, t) {
 // explosion visuals: flash, shock ring, fireball, sparks, smoke and a scorch mark (no camera shake)
 function blastFx(m, x, y, rad) {
   rad = rad || 30;
-  SFX.play('boom');
+  for (let k = 0; k < 12; k++) wallRay(m, x, y, k / 12 * 6.2832, rad * 0.85, 'scorch');   // first person: scorch on walls around
+  SFX.play('boom', 0, x, y);
   m.fx = m.fx || [];
   m.fx.push({ k: 'flash', x, y, t: 0.32, T: 0.32, r: rad * 3 });
   m.fx.push({ k: 'ring', x, y, t: 0.5, T: 0.5, r0: 4, r1: rad * 1.9 });
@@ -2062,7 +2106,7 @@ function updateEnemy(m, e, dt) {
   if (e.stunT > 0) { e.stunT -= dt; e.aimT = 0; return; }        // flashbang
   const dx = p.x - e.x, dy = p.y - e.y, dist = Math.hypot(dx, dy);
   if (e.state === 'sleep') {
-    if ((dist < 120 && visibleAt(m, e.x, e.y)) || (d.fly && dist < 100) || (d.boss && visibleAt(m, e.x, e.y))) { e.state = 'chase'; if (Math.random() < 0.3) SFX.play('alert', 800); }
+    if ((dist < 120 && visibleAt(m, e.x, e.y)) || (d.fly && dist < 100) || (d.boss && visibleAt(m, e.x, e.y))) { e.state = 'chase'; if (Math.random() < 0.3) SFX.play('alert', 800, e.x, e.y); }
     return;
   }
   if (d.tip && S.seen && !S.seen[e.type] && visibleAt(m, e.x, e.y)) { S.seen[e.type] = 1; UI.toast(`<b style="color:#ffb070">⚠ 새로운 적</b> — ${d.tip}`, 3500); }
@@ -2085,7 +2129,7 @@ function updateEnemy(m, e, dt) {
         e.burstT = 0.12; e.burstLeft--;
         const a = e.ang + (Math.random() - 0.5) * d.ranged.spread, mz = 14;
         m.bullets.push({ x: e.x + Math.cos(a) * mz, y: e.y + Math.sin(a) * mz, vx: Math.cos(a) * d.ranged.speed, vy: Math.sin(a) * d.ranged.speed, dmg: d.ranged.dmg * e.dmgMul, life: 2, from: 'e', big: true });
-        SFX.play('enemyShot', 40);
+        SFX.play('enemyShot', 40, e.x, e.y);
         if (!e.burstLeft) e.shootT = 1 / d.ranged.rate * (0.85 + Math.random() * 0.3);
       }
     }
@@ -2098,7 +2142,7 @@ function updateEnemy(m, e, dt) {
       e.shootT = 1 / d.ranged.rate * (0.8 + Math.random() * 0.5);
       const a = e.ang + (Math.random() - 0.5) * 0.15;
       m.bullets.push({ x: e.x + Math.cos(a) * 8, y: e.y + Math.sin(a) * 8, vx: Math.cos(a) * d.ranged.speed, vy: Math.sin(a) * d.ranged.speed, dmg: d.ranged.dmg * e.dmgMul, life: 2, from: 'e' });
-      SFX.play('enemyShot', 80);
+      SFX.play('enemyShot', 80, e.x, e.y);
     }
   } else if (see && dist < 48) { tx = dx / dist; ty = dy / dist; }
   else {
@@ -2123,6 +2167,7 @@ function updateBullets(m, dt) {
       b.x += b.vx * sk * dt / steps; b.y += b.vy * sk * dt / steps;
       const t = tileAt(m, b.x, b.y);
       if (t !== TILE_FLOOR) {
+        if (t === TILE_WALL && !b.explode && !b.flame) wallMark(m, b.x - b.vx * sk * dt / steps, b.y - b.vy * sk * dt / steps, b.x, b.y, 'hole');
         if (!b.explode && ((b.from === 'p' && (t === TILE_CRATE || t === TILE_GEN || t === TILE_ALARM || t === TILE_BARREL)) || (b.from === 'e' && t === TILE_BARREL))) damageTile(m, b.x, b.y, b.dmg);
         if (b.explode) explode(m, b.x - b.vx * 0.02, b.y - b.vy * 0.02, b.explode, b.dmg);
         else puff(m, b.x - b.vx * 0.01, b.y - b.vy * 0.01, 2, b.flame ? ['#e67e22'] : ['#c8c8d8', '#6b6b85'], 30, 0.15);
@@ -2600,7 +2645,7 @@ function fieldUpdate(m, dt) {
       const a = Math.random() * 6.283, d = 18 + Math.random() * 10, v = 50 + Math.random() * 40;
       m.parts.push({ x: h.x + Math.cos(a) * d, y: h.y + Math.sin(a) * d, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0.6, T: 0.6, s: 2 + Math.random() * 3, col: Math.random() < 0.5 ? '#9c8a68' : '#7d8a5a', drag: 0.93, alpha: 1 });
     }
-    if (Math.hypot(h.x - p.x, h.y - p.y) < 320) SFX.play('rotor', 115);
+    if (Math.hypot(h.x - p.x, h.y - p.y) < 320) SFX.play('rotor', 115, h.x, h.y);
   }
   if (m.exit.active && (h.phase === 'gone' || h.phase === 'inbound' || h.phase === 'land' || h.phase === 'wait')) {
     h.smokeT -= dt;
@@ -2774,7 +2819,7 @@ function dogUpdate(m, dt) {
       const d = dist(e, g); if (d > DOG.range || !dogPathClear(m, g.x, g.y, e.x, e.y)) return;
       const sc = d + dist(e, p) * 0.5; if (sc < bd) { bd = sc; best = e; }
     });
-    if (best && best !== g.target) { g.target = best; SFX.play('bark', 1500); }
+    if (best && best !== g.target) { g.target = best; SFX.play('bark', 1500, g.x, g.y); }
   }
   let tx = 0, ty = 0;
   if (g.target) {
@@ -2808,7 +2853,7 @@ function dogUpdate(m, dt) {
   if (dist(g, p) > 260 || g.stuck > 1.5) { dogPlace(m, g); g.stuck = 0; g.target = null; }
   // sniff sleeping enemies nearby
   g.sensed = m.enemies.filter(e => e.state === 'sleep' && dist(e, g) < DOG.sense);
-  g.sensed.forEach(e => { if (!e.sniffed) { e.sniffed = true; SFX.play('bark', 1500); } });
+  g.sensed.forEach(e => { if (!e.sniffed) { e.sniffed = true; SFX.play('bark', 1500, g.x, g.y); } });
 }
 function renderMissionDog(ctx, m, t) {
   const g = m.dog; if (!g || g.hidden || m.state === 'dead') return;
@@ -2967,7 +3012,7 @@ function spawnFar(m, n) {
 }
 
 // ---------------- flares (consumable) ----------------
-function lightFlare(m, x, y) { m.flares.push({ x, y, t: SUPPLIES.flare.dur }); m.visT = 0; SFX.play('flare'); }
+function lightFlare(m, x, y) { m.flares.push({ x, y, t: SUPPLIES.flare.dur }); m.visT = 0; SFX.play('flare', 0, x, y); }
 
 // ---------------- drawing ----------------
 function barrelF(ctx, x, y) {
@@ -3380,8 +3425,8 @@ function bossSummon(m, e, types, n, cap) {
 function bossShoot(m, e, ang, speed, dmg, big) {
   m.bullets.push({ x: e.x + Math.cos(ang) * (e.r + 2), y: e.y + Math.sin(ang) * (e.r + 2), vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed, dmg: dmg * e.dmgMul, life: 2.2, from: 'e', big: !!big });
 }
-function bossRing(m, e, n, speed, dmg) { const o = Math.random() * 6.283; for (let k = 0; k < n; k++) bossShoot(m, e, o + k / n * 6.283, speed, dmg, true); SFX.play('enemyShot'); }
-function bossBurst(m, e, n, spread, speed, dmg) { for (let k = 0; k < n; k++) bossShoot(m, e, e.ang + (k - (n - 1) / 2) * spread / Math.max(1, n - 1), speed, dmg, true); SFX.play('enemyShot', 60); }
+function bossRing(m, e, n, speed, dmg) { const o = Math.random() * 6.283; for (let k = 0; k < n; k++) bossShoot(m, e, o + k / n * 6.283, speed, dmg, true); SFX.play('enemyShot', 0, e.x, e.y); }
+function bossBurst(m, e, n, spread, speed, dmg) { for (let k = 0; k < n; k++) bossShoot(m, e, e.ang + (k - (n - 1) / 2) * spread / Math.max(1, n - 1), speed, dmg, true); SFX.play('enemyShot', 60, e.x, e.y); }
 // walk toward the player (direct when visible, else the flow field), stopping at `keep`
 function bossWalk(m, e, dt, see, dx, dy, dist, keep, mul) {
   let tx = 0, ty = 0;
@@ -3401,10 +3446,10 @@ function bossCharge(m, e, dt, see, dx, dy, dist, every) {
     if (e.dashT <= 0) { e.restT = 0.9; puff(m, e.x, e.y, 10, ['#8a8a94', '#6f6f78'], 50, 0.4); }
     return true;
   }
-  if (e.windT > 0) { e.windT -= dt; e.flash = (e.windT * 4 | 0) % 2 ? 0.05 : 0; if (e.windT <= 0) { e.dashT = 0.65; e.dashHit = false; SFX.play('shotgun'); } return true; }
+  if (e.windT > 0) { e.windT -= dt; e.flash = (e.windT * 4 | 0) % 2 ? 0.05 : 0; if (e.windT <= 0) { e.dashT = 0.65; e.dashHit = false; SFX.play('shotgun', 0, e.x, e.y); } return true; }
   if (e.restT > 0) { e.restT -= dt; return true; }
   e.chargeCd = (e.chargeCd ?? 1.2) - dt;   // first charge soon after spotting the player
-  if (e.chargeCd <= 0 && see && dist < 210 && dist > 26) { e.chargeCd = every; e.windT = 0.85; e.dashA = Math.atan2(dy, dx); e.ang = e.dashA; SFX.play('alert', 300); return true; }
+  if (e.chargeCd <= 0 && see && dist < 210 && dist > 26) { e.chargeCd = every; e.windT = 0.85; e.dashA = Math.atan2(dy, dx); e.ang = e.dashA; SFX.play('alert', 300, e.x, e.y); return true; }
   return false;
 }
 function updateBoss(m, e, dt, dx, dy, dist) {
@@ -3433,7 +3478,7 @@ function updateBoss(m, e, dt, dx, dy, dist) {
         e.flameT -= dt; e.ang = Math.atan2(dy, dx);
         e.flameAcc = (e.flameAcc || 0) + dt * 26;
         while (e.flameAcc >= 1) { e.flameAcc--; const a = e.ang + (Math.random() - 0.5) * 0.7, sp = 130 + Math.random() * 50; m.bullets.push({ x: e.x + Math.cos(a) * 12, y: e.y + Math.sin(a) * 12, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, dmg: 2.4 * e.dmgMul, life: 0.65, from: 'e', flame: true }); }
-        SFX.play('flamer', 120);
+        SFX.play('flamer', 120, e.x, e.y);
         bossWalk(m, e, dt, see, dx, dy, dist, 30, 0.3);
       } else {
         bossWalk(m, e, dt, see, dx, dy, dist, 40);
@@ -4200,6 +4245,10 @@ const F3 = {
   target: null,        // enemy under the crosshair
   m: null,
 };
+// enemy falls: seconds to tip over / lie / sink, how many at once
+const F3_CORPSE = { normal: { fall: 0.32, lie: 1.4, sink: 0.7 }, big: { fall: 0.8, lie: 3.5, sink: 1.2 }, max: 30 };
+// marks on walls: how many of each are kept (oldest go first), size in world units
+const F3_MARK = { hole: { max: 180, size: [1.8, 2.6] }, burn: { max: 60, size: [2.2, 3] }, blood: { max: 90, size: [4, 7.5] }, scorch: { max: 40, size: [9, 15] } };
 const F3_GLOW_MAX = 2200, F3_SMOKE_MAX = 500, F3_SHADOW_MAX = 300;
 // first-person weapon shapes: bw / tw = half width at the bottom / at the muzzle, ty = muzzle height above the screen bottom,
 // kick = how far it jumps when fired (the weapon only - the camera never moves), fl = muzzle flash size
@@ -4609,6 +4658,53 @@ function f3BossCanvas(sp, look, view, step) {
   }
   return f3Outline(a.b);
 }
+// ---------- marks on walls (bullet holes, laser burns, blood, scorch) ----------
+function f3MarkCanvas(kind) {
+  const cv = mkCanvas(64, 64), x = cv.getContext('2d'), r = rnd32(kind.length * 977 + 3), R = () => r();
+  const blob = (cx, cy, rad, col) => { x.fillStyle = col; x.beginPath(); x.arc(cx, cy, rad, 0, 6.2832); x.fill(); };
+  if (kind === 'hole' || kind === 'burn') {
+    const g = x.createRadialGradient(32, 32, 2, 32, 32, 30); g.addColorStop(0, kind === 'burn' ? 'rgba(40,20,10,0.8)' : 'rgba(0,0,0,0.55)'); g.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+    x.strokeStyle = 'rgba(0,0,0,0.6)'; x.lineWidth = 2; x.beginPath();
+    for (let k = 0; k < 5; k++) { const a = R() * 6.28, l = 12 + R() * 16; x.moveTo(32, 32); x.lineTo(32 + Math.cos(a) * l, 32 + Math.sin(a) * l); }
+    x.stroke();
+    blob(32, 32, 11, kind === 'burn' ? '#2a1408' : '#3a3c44'); blob(32, 32, 8, '#050507'); blob(29, 29, 2.5, 'rgba(255,255,255,0.15)');
+    if (kind === 'burn') { x.strokeStyle = 'rgba(255,150,60,0.6)'; x.lineWidth = 2; x.beginPath(); x.arc(32, 32, 10, 0, 6.2832); x.stroke(); }
+  } else if (kind === 'blood') {
+    for (let k = 0; k < 14; k++) blob(32 + (R() - 0.5) * 26, 28 + (R() - 0.5) * 20, 3 + R() * 7, `rgba(${100 + R() * 40 | 0},${10 + R() * 10 | 0},${10 + R() * 10 | 0},0.9)`);
+    for (let k = 0; k < 18; k++) blob(32 + (R() - 0.5) * 56, 28 + (R() - 0.5) * 48, 0.8 + R() * 2, 'rgba(110,14,14,0.85)');
+    x.fillStyle = 'rgba(100,12,12,0.85)'; for (let k = 0; k < 4; k++) { const dx = 20 + R() * 24; x.fillRect(dx, 30, 2, 14 + R() * 20); blob(dx + 1, 46 + R() * 14, 2, 'rgba(100,12,12,0.85)'); }   // drips
+  } else {   // scorch
+    const g = x.createRadialGradient(32, 32, 1, 32, 32, 31); g.addColorStop(0, 'rgba(6,6,8,0.85)'); g.addColorStop(0.45, 'rgba(14,12,10,0.6)'); g.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+    for (let k = 0; k < 22; k++) { const a = R() * 6.28, d = 8 + R() * 20; blob(32 + Math.cos(a) * d, 32 + Math.sin(a) * d, 1 + R() * 4, 'rgba(10,8,8,0.55)'); }
+  }
+  return cv;
+}
+function f3InitMarks() {
+  F3.mk = {}; const dummy = new THREE.Object3D();
+  for (const kind in F3_MARK) {
+    const t = new THREE.CanvasTexture(f3MarkCanvas(kind)); t.magFilter = THREE.NearestFilter;
+    const me = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }), F3_MARK[kind].max);
+    me.count = 0; me.frustumCulled = false; me.renderOrder = 0; F3.scene.add(me);
+    F3.mk[kind] = { me, n: 0, dummy };
+  }
+}
+// put one mark on the wall face that (x0, y0) -> (x1, y1) crossed
+function f3AddMark(m, o) {
+  const i = Math.floor(o.x1 / T), j = Math.floor(o.y1 / T), pi = Math.floor(o.x0 / T), pj = Math.floor(o.y0 / T);
+  if (tileAt(m, o.x1, o.y1) !== TILE_WALL || (m.field && m.deco[j * m.W + i] !== W_BLD)) return;
+  const open = (a, b) => tileAt(m, a * T + 8, b * T + 8) !== TILE_WALL;
+  let ax;
+  if (pi !== i && (pj === j || open(pi, j))) ax = 'x'; else if (pj !== j && open(i, pj)) ax = 'z'; else if (pi !== i) ax = 'x'; else return;
+  let px, pz;
+  if (ax === 'x') { px = pi < i ? i * T - 0.06 : (i + 1) * T + 0.06; const k = o.x1 !== o.x0 ? (px - o.x0) / (o.x1 - o.x0) : 0; pz = Math.max(j * T + 1, Math.min(j * T + T - 1, o.y0 + (o.y1 - o.y0) * k)); }
+  else { pz = pj < j ? j * T - 0.06 : (j + 1) * T + 0.06; const k = o.y1 !== o.y0 ? (pz - o.y0) / (o.y1 - o.y0) : 0; px = Math.max(i * T + 1, Math.min(i * T + T - 1, o.x0 + (o.x1 - o.x0) * k)); }
+  const M = F3_MARK[o.kind], K = F3.mk[o.kind]; if (!M || !K) return;
+  const size = M.size[0] + Math.random() * (M.size[1] - M.size[0]), wh = m.field ? 20 : F3.wallH;
+  const h = o.kind === 'scorch' ? 2 + Math.random() * 5 : o.kind === 'blood' ? 3 + Math.random() * 8 : 4 + Math.random() * 10;
+  const d = K.dummy; d.position.set(px, Math.min(wh - size / 2, Math.max(size / 2 * (o.kind === 'scorch' ? 0.3 : 1), h)), pz);
+  d.rotation.set(0, ax === 'x' ? Math.PI / 2 : 0, o.kind === 'blood' ? 0 : Math.random() * 6.28); d.scale.set(size, size, 1); d.updateMatrix();
+  K.me.setMatrixAt(K.n % M.max, d.matrix); K.n++; K.me.count = Math.min(K.n, M.max); K.me.instanceMatrix.needsUpdate = true;
+}
 function f3IconCanvas(name) {
   F3.icons = F3.icons || {};
   if (F3.icons[name]) return F3.icons[name];
@@ -4762,7 +4858,7 @@ function f3Build(m) {
   if (F3.floorTex) F3.floorTex.dispose();
   if (F3.skyTex) { F3.skyTex.dispose(); F3.skyTex = null; }
   const sc = F3.scene = new THREE.Scene(), th = m.th, Wt = m.W * T, Ht = m.H * T, fld = !!m.field, air = f3Air(m);
-  F3.m = m; F3.exitOn = null; F3.walls = null; F3.props = []; F3.pool = []; F3.kills = -1; F3.texT = 0; F3.heli = null; F3.exitPad = null;
+  F3.m = m; F3.exitOn = null; F3.walls = null; F3.props = []; F3.pool = []; F3.kills = -1; F3.texT = 0; F3.heli = null; F3.exitPad = null; F3.corpses = []; F3.seen = new Set(); m.marks = [];
   const fogCol = new THREE.Color(air.fog);
   if (air.sky === air.fog) sc.background = fogCol;
   else {   // sky fading into the haze at the horizon (the horizon is always at the middle of the screen: no looking up / down)
@@ -4804,6 +4900,7 @@ function f3Build(m) {
   // point clouds: glow (additive: bullets, beams, sparks, explosions, warnings) and smoke (normal blending: smoke, debris, blood)
   F3.Sm = f3MakePts(F3_SMOKE_MAX, false); F3.G = f3MakePts(F3_GLOW_MAX, true);
   F3.Sm.obj.renderOrder = 1; F3.G.obj.renderOrder = 2; sc.add(F3.Sm.obj); sc.add(F3.G.obj);
+  f3InitMarks();
   F3.wKey = null; F3.swapT = 0; F3.shotT = 9; F3.hitT = 0; F3.killT = 0; F3.killN = m.kills; F3.warn = null;
   // face the longest open direction at the start
   const p = m.player; let best = 0, bd = -1;
@@ -4856,14 +4953,15 @@ function f3Shade(x, y, d) {
   a[o] = d; a[o + 1] = 0; a[o + 2] = 0; a[o + 3] = 0; a[o + 4] = 0; a[o + 5] = 1; a[o + 6] = 0; a[o + 7] = 0; a[o + 8] = 0; a[o + 9] = 0; a[o + 10] = d; a[o + 11] = 0; a[o + 12] = x; a[o + 13] = 0.07; a[o + 14] = y; a[o + 15] = 1;
   F3.shN = n + 1;
 }
-function f3Sprite(c, x, h, y, scale, tint) {
+function f3Sprite(c, x, h, y, scale, tint, rot, squash) {
   let s = F3.pool[F3.sn];
   if (!s) { s = new THREE.Sprite(new THREE.SpriteMaterial({ map: f3Tex(c), alphaTest: 0.5, fog: true })); s.center.set(0.5, 0); F3.pool.push(s); F3.scene.add(s); }
   F3.sn++;
   const t = f3Tex(c); if (s.material.map !== t) s.material.map = t;
   s.material.color.set(tint || 0xffffff);
   const ppu = c.ppu || RS;   // picture pixels per world unit
-  s.scale.set(c.width / ppu * scale, c.height / ppu * scale, 1);
+  s.scale.set(c.width / ppu * scale * (squash ? 1 + squash * 0.3 : 1), c.height / ppu * scale * (squash ? 1 - squash * 0.75 : 1), 1);   // squash: collapse (0..1)
+  s.material.rotation = rot || 0;   // about the bottom centre (s.center)
   s.position.set(x, h, y); s.visible = true;
 }
 // world point -> overlay canvas coordinates (null when behind the camera)
@@ -4939,6 +5037,7 @@ function f3Render(ctx, m, t, dt) {
   F3.target = playing && !p.riding ? f3FindTarget(m) : null;
 
   // ----- sprites -----
+  if (m.marks && m.marks.length) { m.marks.forEach(o => f3AddMark(m, o)); m.marks.length = 0; }
   F3.sn = 0; F3.shN = 0;
   // things standing on top of the player (melee enemies, the dog) are drawn a little away so they never fill the screen
   const near = (o, min) => {
@@ -4957,14 +5056,40 @@ function f3Render(ctx, m, t, dt) {
     const sp = d.boss || (d.unique ? e.type : '');   // bosses / the unique enemy: own picture
     const base = k === 'drone' ? f3CharCanvas(k, d.look || {}, 'f', (t * 20 | 0) & 1, sp) : f3CharCanvas(k, d.look || {}, view(e.ang, e), ((e._w3 || 0) * 5 | 0) & 1, sp);
     let c = base; if (e.flash > 0) { c = whiteOf(base); c.ppu = base.ppu; }
+    if (e._hp3 !== undefined && e.hp < e._hp3) { e._fl3 = 0.16; e._fd3 = -(e._fd3 || 1); }   // hit: a short flinch (lean back, alternating side)
+    e._hp3 = e.hp; e._fl3 = Math.max(0, (e._fl3 || 0) - (F3.dt || 0));
+    const fl = e._fl3 / 0.16, heavy = d.heavy || d.boss;
     const s = base.width > 56 ? (m.field ? 1.1 : 0.95) : Math.min(1.5, d.scale || 1) * 0.8;   // boss pictures are drawn large already (indoors they just fit under the ceiling)
     const fuse = e.fuseT !== undefined && (t * 12 | 0) % 2;
-    const q = near(e, 14 * Math.max(1, s));
+    const q0 = near(e, 14 * Math.max(1, s)), pd = Math.hypot(q0.x - p.x, q0.y - p.y) || 1, push = fl * (heavy ? 0.6 : 2);
+    const q = { x: q0.x + (q0.x - p.x) / pd * push, y: q0.y + (q0.y - p.y) / pd * push };
+    const hy = k === 'drone' ? (base.width > 56 ? 5 : 12) + Math.sin(t * 3 + e.wob) * 0.8 : 0;
     f3Shade(q.x, q.y, k === 'drone' ? 9 : e.r * 2.8);
-    f3Sprite(c, q.x, k === 'drone' ? (base.width > 56 ? 5 : 12) + Math.sin(t * 3 + e.wob) * 0.8 : 0, q.y, s, ally ? 0x8fd8ff : fuse ? 0xffa040 : e.state === 'sleep' ? 0xb0b6c8 : 0xffffff);
+    f3Sprite(c, q.x, hy, q.y, s, ally ? 0x8fd8ff : fuse ? 0xffa040 : e.state === 'sleep' ? 0xb0b6c8 : 0xffffff, fl * (heavy ? 0.05 : 0.16) * (e._fd3 || 1));
+    if (!ally) e._d3 = { c: base, x: q.x, y: q.y, h: hy, s, big: base.width > 56, fly: k === 'drone', skip: !!d.bomb };   // what to drop when it dies
   };
   if (m.allies) m.allies.forEach(e => unit(e, true));
   m.enemies.forEach(e => unit(e, false));
+  // enemies gone since the last frame with no health left fell: they tip over, lie a moment, then sink into the floor
+  const now = new Set(m.enemies);
+  F3.seen.forEach(e => {
+    if (now.has(e) || !(e.hp <= 0) || !e._d3 || e._d3.skip) return;   // (bombers blow up instead)
+    // far away: tip over sideways; close by: collapse on the spot (tipping a big picture over would sweep across the screen)
+    const o = Object.assign({ t: 0, dir: Math.random() < 0.5 ? -1 : 1, slump: Math.hypot(e._d3.x - p.x, e._d3.y - p.y) < 45 }, e._d3);
+    F3.corpses.push(o); if (F3.corpses.length > F3_CORPSE.max) F3.corpses.shift();
+  });
+  F3.seen = now;
+  F3.corpses = F3.corpses.filter(o => {
+    const C = o.big ? F3_CORPSE.big : F3_CORPSE.normal; o.t += F3.dt || 0;
+    if (o.t > C.fall + C.lie + C.sink) return false;
+    const k = Math.min(1, o.t / C.fall), ease = 1 - (1 - k) * (1 - k), w = o.c.width / o.c.ppu * o.s;
+    const sink = Math.max(0, o.t - C.fall - C.lie) / C.sink;
+    const h = (o.fly ? o.h * (1 - k * k) : 0) - sink * w * 0.6, flash = o.t < 0.08;
+    let cv = o.c; if (flash) { cv = whiteOf(o.c); cv.ppu = o.c.ppu; }
+    f3Sprite(cv, o.x, h, o.y, o.s, k < 1 ? 0xffffff : 0x9a9a9a, o.slump ? o.dir * 0.3 * ease : o.dir * Math.PI / 2 * ease * (o.fly ? 1 : 0.96), o.slump ? ease : 0);
+    if (sink < 0.5) f3Shade(o.x + (o.slump ? 0 : o.dir * w * 0.3 * ease), o.y, w * (0.5 + 0.5 * ease));
+    return true;
+  });
   if (m.dog && !m.dog.hidden && m.state !== 'dead') {
     const f = (typeof DOG_FURS !== 'undefined' && S.dog && DOG_FURS[S.dog.fur]) || { base: '#8a5a32', dark: '#5e3a1e', light: '#c89a6a' };
     const dg = m.dog, dq = near(dg, 20);
@@ -5533,6 +5658,7 @@ function frameBody(now) {
   ctx.setTransform(RS, 0, 0, RS, 0, 0); ctx.imageSmoothingEnabled = false;
   if (Game.mode === 'mission' && M) {
     M.fp = f3Active(M);   // first-person balance (FP_BAL) applies only while the 3D view is on
+    SFX.ear(M, M.player.x, M.player.y, M.fp ? F3.yaw : 0, M.fp);   // positional sound follows the player
     readInput(dt);
     if (!Game.paused && !Game.mapHeld) updateMission(M, dt, inp);
     const v3 = f3Active(M);
@@ -5543,7 +5669,7 @@ function frameBody(now) {
       UI.updateHud(M);
     }
   } else if (S) {
-    f3Show(false);
+    f3Show(false); SFX.ear(null);
     updateRoom(dt); renderRoom(ctx, clock);
   } else {
     ctx.fillStyle = '#0b0c12'; ctx.fillRect(0, 0, VW, VH);
