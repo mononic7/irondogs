@@ -217,6 +217,15 @@ textarea { width: 100%; height: 80px; background: #0b0c12; color: var(--txt); bo
       <button data-panel="gear">장비</button>
       <button data-panel="shop">상점</button>
       <button id="bEdit">꾸미기</button>
+      <button id="bWalk">3D 둘러보기</button>
+    </div>
+  </section>
+
+  <!-- armory in first person (room3d.js) -->
+  <section id="walk" class="screen">
+    <div class="topbar">
+      <div class="hint" id="walkHint"></div>
+      <button class="go" id="bWalkExit">나가기</button>
     </div>
   </section>
 
@@ -3593,19 +3602,22 @@ function updateRoom(dt) {
 }
 
 // ---------- render ----------
+// floor tiles at fine resolution (cached; also the floor of the 3D walk in room3d.js)
+function roomFloorCanvas() {
+  if (!RE.floorC || RE.floorId !== S.room.floor) {
+    RE.floorId = S.room.floor; RE.floorC = mkCanvas(ROOM_W * FT, ROOM_H * FT);
+    const fx = RE.floorC.getContext('2d'), fn = ROOM_FLOOR_F[S.room.floor] || ROOM_FLOOR_F.metal;
+    for (let j = 1; j < ROOM_H; j++) for (let i = 0; i < ROOM_W; i++) fn(fx, i * FT, j * FT, i, j);
+  }
+  return RE.floorC;
+}
 function renderRoom(ctx, t) {
   // backdrop
   ctx.fillStyle = '#0b0c12'; ctx.fillRect(0, 0, VW, VH);
   ctx.fillStyle = '#12131c'; for (let y = 0; y < VH; y += 8) for (let x = (y / 8 % 2) * 8; x < VW; x += 16) ctx.fillRect(x, y, 8, 8);
   const ox = ROOM_OX, oy = ROOM_OY, W = ROOM_W * T, H = ROOM_H * T;
   ctx.fillStyle = '#000'; ctx.fillRect(ox - 3, oy - 22, W + 6, H + 25);
-  // floor (cached at fine resolution)
-  if (!RE.floorC || RE.floorId !== S.room.floor) {
-    RE.floorId = S.room.floor; RE.floorC = mkCanvas(ROOM_W * FT, ROOM_H * FT);
-    const fx = RE.floorC.getContext('2d'), fn = ROOM_FLOOR_F[S.room.floor] || ROOM_FLOOR_F.metal;
-    for (let j = 1; j < ROOM_H; j++) for (let i = 0; i < ROOM_W; i++) fn(fx, i * FT, j * FT, i, j);
-  }
-  ctx.drawImage(RE.floorC, ox, oy, W, H);
+  ctx.drawImage(roomFloorCanvas(), ox, oy, W, H);
   // wall (row 0 plus a strip above)
   ctx.save(); ctx.scale(1 / RS, 1 / RS);
   roomWallF(ctx, ox * RS, (oy - 20) * RS, W * RS, (T + 20) * RS, ROOM_WALLS[S.room.wall], S.room.wall, t);
@@ -3693,8 +3705,9 @@ const UI = {
   screen: null, panel: null, sub: {}, _icons: {},
 
   show(name) {
-    ['title', 'hub', 'edit', 'hud'].forEach(s => $(s).classList.toggle('on', s === name));
-    $('touch').classList.toggle('on', name === 'hud');
+    ['title', 'hub', 'edit', 'hud', 'walk'].forEach(s => $(s).classList.toggle('on', s === name));
+    $('touch').classList.toggle('on', name === 'hud' || name === 'walk');
+    if (name === 'walk') $('walkHint').textContent = F3.touch ? '왼쪽 끌기: 이동 · 오른쪽 끌기: 둘러보기 · 가구 탭: 진열/정보' : 'WASD 이동 · 마우스 끌기/화살표: 둘러보기 · 클릭/E: 진열/정보 · Esc 나가기';
     this.screen = name;
     $('toasts').innerHTML = '';
     if (name === 'hub') this.refreshHub();
@@ -5418,6 +5431,252 @@ function f3Threats(m) {
 function f3Turn(dx, k) { F3.yaw += Math.max(-150, Math.min(150, dx)) * k * ((S && S.settings && S.settings.sens) || 1); }   // S.settings.sens: look sensitivity chosen in the settings
 
 // ===================================================================
+// room3d.js - walking around the armory in first person (Three.js, uses the fps3d.js renderer)
+// The room stays the same 2D layout (ROOM_W x ROOM_H tiles, row 0 = back wall). 3D (x, height, z) = room pixels from the
+// room's top-left corner. The hero (RE.hero, top-down canvas coordinates) is the camera, so the top-down room shows the
+// hero where the walk ended. Furniture = upright pictures facing the camera (like the enemies in missions),
+// wall decorations (poster, flag, monitor) = pictures on the back wall, rugs = painted on the floor.
+// No head bob, no camera shake (the user is sensitive to motion sickness).
+// ===================================================================
+const ROOM3D = {
+  wallH: 30,      // wall height (world units; the eye is at F3.eye = 11)
+  scale: 0.72,    // furniture picture size (1 = the top-down picture 1:1)
+  r: 5,           // body radius for bumping into furniture and walls
+  speed: 60,      // walking speed (same as the top-down hero)
+  dogSide: 0.5, dogDist: 26,   // where the dog trots: angle from the view direction (+ = right) and distance (in view, not in the way)
+};
+const W3 = { on: false, cards: [], decals: [], target: null, lx: 0, md: null, built: null };
+
+function w3Room() { return { Wt: ROOM_W * T, Ht: ROOM_H * T, z0: T }; }   // back wall face at z = T (row 0 is the wall)
+function w3Pos() { const h = heroState(); return { x: h.x - ROOM_OX, z: h.y - ROOM_OY }; }
+
+// ---------- enter / leave ----------
+function walkEnter() {
+  if (!f3Init()) { UI.toast('이 기기에서는 3D 화면을 쓸 수 없습니다'); return; }
+  const h = heroState(); h.tx = null;
+  W3.on = true; W3.target = null; W3.md = null; F3.yaw = -Math.PI / 2;   // face the back wall (weapon racks, posters)
+  w3Unstick();
+  resetInput(); UI.show('walk');
+}
+function walkExit() {
+  if (!W3.on) return;
+  W3.on = false; resetInput();
+  const h = heroState(); h.ang = F3.yaw;
+  S.room.hero = { x: Math.max(0, Math.min(ROOM_W - 1, Math.floor((h.x - ROOM_OX) / T))), y: Math.max(1, Math.min(ROOM_H - 1, Math.floor((h.y - ROOM_OY) / T))) };
+  saveGame(true); f3Show(false); UI.show('hub');
+}
+
+// ---------- bumping into things ----------
+function w3Blocks() {
+  return S.room.items.filter(o => FURNITURE[o.id].layer === 'obj').map(o => { const f = FURNITURE[o.id]; return [o.x * T, o.y * T, (o.x + f.w) * T, (o.y + f.h) * T]; });
+}
+function w3Free(x, z, bl) {
+  const { Wt, Ht, z0 } = w3Room(), r = ROOM3D.r;
+  if (x < r || x > Wt - r || z < z0 + r || z > Ht - r) return false;
+  return !bl.some(b => x > b[0] - r && x < b[2] + r && z > b[1] - r && z < b[3] + r);
+}
+// standing inside furniture (the top-down hero walks through it): step to the nearest free tile centre
+function w3Unstick() {
+  const h = heroState(), p = w3Pos(), bl = w3Blocks();
+  if (w3Free(p.x, p.z, bl)) return;
+  let best = null, bd = 1e9;
+  for (let j = 1; j < ROOM_H; j++) for (let i = 0; i < ROOM_W; i++) {
+    const x = i * T + 8, z = j * T + 8, d = Math.hypot(x - p.x, z - p.z);
+    if (d < bd && w3Free(x, z, bl)) { bd = d; best = [x, z]; }
+  }
+  if (best) { h.x = ROOM_OX + best[0]; h.y = ROOM_OY + best[1]; }
+}
+
+// ---------- per frame ----------
+function walkUpdate(dt) {
+  const h = heroState(), modal = !$('modal').classList.contains('hidden');
+  if (!modal) {
+    F3.yaw += ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) * F3.keyTurn * dt;
+    let f = 0, s = 0;
+    if (keys.KeyW || keys.ArrowUp) f += 1; if (keys.KeyS || keys.ArrowDown) f -= 1;
+    if (keys.KeyD) s += 1; if (keys.KeyA) s -= 1;
+    for (const id in sticks) { const k = sticks[id]; if (k.side === 'L') { s += k.dx; f -= k.dy; } }
+    const l = Math.hypot(f, s);
+    if (l > 0.1) {
+      if (l > 1) { f /= l; s /= l; }
+      const c = Math.cos(F3.yaw), sn = Math.sin(F3.yaw), d = ROOM3D.speed * dt, bl = w3Blocks();
+      const dx = (c * f - sn * s) * d, dz = (sn * f + c * s) * d, p = w3Pos();
+      if (w3Free(p.x + dx, p.z, bl)) h.x += dx;          // slide along walls / furniture
+      if (w3Free(h.x - ROOM_OX, p.z + dz, bl)) h.y += dz;
+      h.step += dt * 10;
+    }
+  }
+  h.ang = F3.yaw;
+  // the dog trots at the front right where it can be seen (the top-down room has it behind the hero):
+  // updateRoomDog follows a point behind "h", so hand it an h placed so that point is where the dog should be
+  const da = F3.yaw + ROOM3D.dogSide, { Wt, Ht, z0 } = w3Room();
+  const tx = Math.max(6, Math.min(Wt - 6, h.x - ROOM_OX + Math.cos(da) * ROOM3D.dogDist)) + ROOM_OX, ty = Math.max(z0 + 6, Math.min(Ht - 6, h.y - ROOM_OY + Math.sin(da) * ROOM3D.dogDist)) + ROOM_OY;
+  updateRoomDog(dt, { x: tx + Math.cos(F3.yaw) * 14, y: ty + Math.sin(F3.yaw) * 10 - 4, ang: F3.yaw });
+  if (RE.flash) RE.flash = null;
+}
+
+// ---------- building the room ----------
+// picture of one piece of furniture (the top-down picture at fine resolution; the mannequin's figure is a separate sprite)
+function w3CardCanvas(o, t) { return furnitureHi(o.id, resolveDisp(o), t); }
+// the mannequin in 3D: the first-person soldier picture (front) wearing what is displayed
+function w3Mannequin(o) {
+  const d = {}; resolveDisp(o).forEach(g => { if (g) d[g.slot] = g; });
+  return f3CharCanvas('soldier', { A: d.armor ? d.armor.color : '#9a9aa8', H: d.helmet ? d.helmet.color : '#b9bccf', s: '#cfd2dc', V: '#3d3d52' }, 'f', 0);
+}
+function w3WallCanvas(len, front) {
+  const c = mkCanvas(len * RS, ROOM3D.wallH * RS), x = c.getContext('2d'), wl = ROOM_WALLS[S.room.wall] || ROOM_WALLS.concrete;
+  roomWallF(x, 0, 0, c.width, c.height, wl, S.room.wall, W3.wallT || 0);
+  if (front) {   // the way out: a steel door with an exit light over it
+    const dx = (c.width >> 1) - 26, P = (a, b, w, h, col) => px1(x, a, b, w, h, col), H = c.height;
+    P(dx - 4, H - 50, 60, 50, '#16171f'); P(dx, H - 46, 52, 46, '#4a5064'); P(dx, H - 46, 52, 2, '#6c738a'); P(dx + 25, H - 46, 2, 46, '#2c3040');
+    for (let i = 0; i < 3; i++) { P(dx + 4, H - 40 + i * 12, 18, 6, '#3b4052'); P(dx + 30, H - 40 + i * 12, 18, 6, '#3b4052'); }
+    P(dx + 20, H - 22, 3, 6, '#c8ccd8'); P(dx + 29, H - 22, 3, 6, '#c8ccd8');
+    P(dx + 12, H - 58, 28, 7, '#0c2a16'); P(dx + 14, H - 57, 24, 5, '#3fd07a'); P(dx + 14, H - 57, 24, 1, '#a8ffcc');
+  }
+  return c;
+}
+function w3Build() {
+  if (F3.scene) F3.scene.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+  if (W3.floorTex) W3.floorTex.dispose();
+  (W3.wallTex || []).forEach(t => t.dispose());
+  const sc = F3.scene = new THREE.Scene(), { Wt, Ht, z0 } = w3Room(), WH = ROOM3D.wallH;
+  F3.m = W3; F3.pool = []; W3.cards = []; W3.decals = [];
+  W3.built = w3Sig();
+  sc.background = new THREE.Color('#0b0c12'); sc.fog = new THREE.Fog(new THREE.Color('#0b0c12'), 120, 520);
+  // floor: the top-down floor without the wall row, with the rugs painted on
+  const fc = mkCanvas(ROOM_W * FT, (ROOM_H - 1) * FT), fx = fc.getContext('2d'); fx.imageSmoothingEnabled = false;
+  fx.drawImage(roomFloorCanvas(), 0, -FT);
+  S.room.items.filter(o => FURNITURE[o.id].layer === 'floor').forEach(o => fx.drawImage(furnitureHi(o.id, [], 0), o.x * FT - 16, (o.y - 1) * FT - 40));
+  const ft = W3.floorTex = new THREE.CanvasTexture(fc);
+  ft.magFilter = THREE.NearestFilter; ft.minFilter = THREE.LinearMipmapLinearFilter; ft.anisotropy = Math.min(8, F3.r.capabilities.getMaxAnisotropy());
+  let g = f3Geo(); f3Quad(g, [0, 0, Ht], [Wt, 0, Ht], [Wt, 0, z0], [0, 0, z0], 1);
+  const du = ROOM_W / 2, dv = (ROOM_H - 1) / 2; g.u2 = [0, 0, du, 0, du, dv, 0, 0, du, dv, 0, dv];
+  const dt = new THREE.CanvasTexture(f3DetailCanvas(false)); dt.wrapS = dt.wrapT = THREE.RepeatWrapping; dt.magFilter = THREE.NearestFilter;
+  sc.add(f3Mesh(g, ft, { aoMap: dt, aoMapIntensity: 1 }));
+  // ceiling
+  const ct = new THREE.CanvasTexture(f3CeilCanvas(MISSION_THEMES[0], false)); ct.wrapS = ct.wrapT = THREE.RepeatWrapping; ct.magFilter = THREE.NearestFilter;
+  g = f3Geo(); f3Quad(g, [0, WH, Ht], [Wt, WH, Ht], [Wt, WH, z0], [0, WH, z0], 0.8, ROOM_W / 2, (ROOM_H - 1) / 2); sc.add(f3Mesh(g, ct));
+  // walls (darker toward the floor; the side walls a little darker than the back / front)
+  const wall = (len, k, a, b, c, d, front) => {
+    const cv = w3WallCanvas(len, front), t = new THREE.CanvasTexture(cv); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.LinearMipmapLinearFilter;
+    W3.wallTex.push(t); const q = f3Geo(); f3Quad(q, a, b, c, d, [k * 0.72, k * 0.72, k, k]); const me = f3Mesh(q, t); sc.add(me);
+    return { cv, t, len, front };
+  };
+  W3.wallTex = [];
+  W3.walls = [
+    wall(Wt, 1, [0, 0, z0], [Wt, 0, z0], [Wt, WH, z0], [0, WH, z0]),                    // back
+    wall(Wt, 0.92, [Wt, 0, Ht], [0, 0, Ht], [0, WH, Ht], [Wt, WH, Ht], true),           // front (door)
+    wall(Ht - z0, 0.8, [0, 0, Ht], [0, 0, z0], [0, WH, z0], [0, WH, Ht]),               // left
+    wall(Ht - z0, 0.8, [Wt, 0, z0], [Wt, 0, Ht], [Wt, WH, Ht], [Wt, WH, z0]),           // right
+  ];
+  // soft round shadows under furniture and the dog
+  if (!F3.shadowC) { const c = F3.shadowC = mkCanvas(64, 64), x = c.getContext('2d'), gr = x.createRadialGradient(32, 32, 2, 32, 32, 32); gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(0.6, 'rgba(0,0,0,0.3)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = gr; x.fillRect(0, 0, 64, 64); }
+  F3.shadow = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(F3.shadowC), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }), F3_SHADOW_MAX);
+  F3.shadow.frustumCulled = false; F3.shadow.count = 0; sc.add(F3.shadow);
+  // furniture: upright pictures; wall decorations: flat pictures on the back wall
+  S.room.items.forEach(o => {
+    const f = FURNITURE[o.id];
+    if (f.layer === 'obj') {
+      const c = w3CardCanvas(o, 0), s = new THREE.Sprite(new THREE.SpriteMaterial({ map: f3Tex(c), alphaTest: 0.5, fog: true }));
+      s.center.set(0.5, 0); s.userData.uid = o.uid; sc.add(s);
+      W3.cards.push({ o, s, x: (o.x + f.w / 2) * T, z: (o.y + f.h / 2) * T });
+    } else if (f.layer === 'wall') {
+      const c = furnitureHi(o.id, [], 0), w = c.width / RS, hh = c.height / RS;
+      const me = new THREE.Mesh(new THREE.PlaneGeometry(w, hh), new THREE.MeshBasicMaterial({ map: f3Tex(c), alphaTest: 0.5, fog: true }));
+      me.position.set(o.x * T - 8 + w / 2, 24 + 20 - hh / 2, z0 + 0.15); me.userData.uid = o.uid; sc.add(me);   // tile top (picture y 20) at height 24
+      W3.decals.push({ o, me });
+    }
+  });
+  F3.G = f3MakePts(200, true); F3.G.obj.renderOrder = 2; sc.add(F3.G.obj);
+  W3.ray = W3.ray || new THREE.Raycaster();
+}
+// what the room looks like (rebuild when it changed: another floor / wall, furniture moved)
+function w3Sig() { return S.room.floor + '|' + S.room.wall + '|' + S.room.items.map(o => o.uid + o.x + ',' + o.y).join(';'); }
+
+// ---------- drawing ----------
+function walkRender(ctx, t, dt) {
+  if (!f3Init()) { walkExit(); return; }
+  if (F3.aa !== f3Gfx().aa) f3MakeRenderer();
+  if (F3.m !== W3 || W3.built !== w3Sig()) w3Build();
+  f3Show(true); f3Resize();
+  // the high-tech wall's lights blink
+  if (S.room.wall === 'tech' && (t * 2 | 0) !== W3.blink) {
+    W3.blink = t * 2 | 0; W3.wallT = t;
+    W3.walls.forEach(w => { w.cv.getContext('2d').drawImage(w3WallCanvas(w.len, w.front), 0, 0); w.t.needsUpdate = true; });
+  }
+  const p = w3Pos(), cam = F3.cam, sc = ROOM3D.scale;
+  cam.position.set(p.x, F3.eye, p.z); cam.lookAt(p.x + Math.cos(F3.yaw), F3.eye, p.z + Math.sin(F3.yaw)); cam.updateMatrixWorld();
+  F3.sn = 0; F3.shN = 0; F3.G.n = 0;
+  W3.cards.forEach(cd => {
+    const c = w3CardCanvas(cd.o, t), tx = f3Tex(c), s = cd.s;
+    if (s.material.map !== tx) s.material.map = tx;
+    // picture bottom margin (8 units under the front edge of the tile) goes under the floor
+    s.scale.set(c.width / RS * sc, c.height / RS * sc, 1); s.position.set(cd.x, -8 * sc, cd.z);
+    const f = FURNITURE[cd.o.id];
+    f3Shade(cd.x, cd.z, f.w * T * 0.9);
+    if (cd.o.id === 'mannequin') f3Sprite(w3Mannequin(cd.o), cd.x, 3.5 * sc, cd.z + 0.5, 0.8);   // stands on the stand (a hair in front of it)
+    if (f.light) { f3Glow(cd.x, 15, cd.z, 26, 1, 0.85, 0.45, 0.55); f3Glow(cd.x, 15, cd.z, 9, 1, 0.95, 0.7, 0.9); }
+  });
+  W3.decals.forEach(d => { const f = FURNITURE[d.o.id]; if (f.anim) { const tx = f3Tex(furnitureHi(d.o.id, [], t)); if (d.me.material.map !== tx) d.me.material.map = tx; } });
+  // the dog (pushed away a little when it is right on the camera)
+  const dg = RE.dog;
+  if (dg) {
+    let x = dg.x - ROOM_OX, z = dg.y - ROOM_OY; const dx = x - p.x, dz = z - p.z, d = Math.hypot(dx, dz);
+    if (d < 14) { const a = d > 0.5 ? Math.atan2(dz, dx) : F3.yaw; x = p.x + Math.cos(a) * 14; z = p.z + Math.sin(a) * 14; }
+    const fr = DOG_FURS[dogSave().fur] || DOG_FURS.brown, rx = -Math.sin(F3.yaw), ry = Math.cos(F3.yaw);
+    const side = Math.cos(dg.ang) * rx + Math.sin(dg.ang) * ry > 0 ? 'r' : 'l';
+    f3Sprite(f3CharCanvas('dog', { A: fr.base, H: fr.light, d: fr.dark }, side, dg.moving ? (t * 8 | 0) & 1 : 0), x, 0, z, 0.8); f3Shade(x, z, 11);
+  }
+  for (let i = F3.sn; i < F3.pool.length; i++) F3.pool[i].visible = false;
+  F3.shadow.count = F3.shN; F3.shadow.instanceMatrix.needsUpdate = true;
+  f3FlushPts(F3.G, F3.r.domElement.height / (2 * Math.tan(F3.fov * Math.PI / 360)));
+  W3.target = w3Pick(0, 0);
+  F3.r.render(F3.scene, cam);
+  w3Overlay(ctx, t);
+}
+// furniture at a screen point (ndc -1..1), nearest first
+function w3Pick(nx, ny) {
+  W3.ray.setFromCamera({ x: nx, y: ny }, F3.cam);
+  const hits = W3.ray.intersectObjects(W3.cards.map(c => c.s).concat(W3.decals.map(d => d.me)), false);
+  for (const h of hits) {
+    const o = S.room.items.find(q => q.uid === h.object.userData.uid);
+    if (o && h.distance < 260) return o;
+  }
+  return null;
+}
+function w3Overlay(ctx, t) {
+  ctx.setTransform(F3.os, 0, 0, F3.os, 0, 0); ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, VW, VH);
+  const cx = VW / 2, cy = VH / 2, o = W3.target;
+  ctx.fillStyle = o ? '#ffd34a' : 'rgba(255,255,255,0.7)';
+  ctx.fillRect(cx - 0.75, cy - 0.75, 1.5, 1.5);
+  if (o) {
+    const f = FURNITURE[o.id];
+    ctx.strokeStyle = '#ffd34a'; ctx.lineWidth = 0.6; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 6.2832); ctx.stroke();
+    const txt = f.name + (f.slots ? (F3.touch ? ' · 탭해서 진열' : ' · 클릭/E 진열') : '');
+    ctx.font = '7px sans-serif'; ctx.textAlign = 'center';
+    const w = ctx.measureText(txt).width + 8;
+    ctx.fillStyle = 'rgba(10,12,20,0.75)'; ctx.fillRect(cx - w / 2, cy + 9, w, 11);
+    ctx.fillStyle = '#ffe9a8'; ctx.fillText(txt, cx, cy + 17);
+    ctx.textAlign = 'left';
+  }
+}
+
+// ---------- using furniture ----------
+function walkUse(o) {
+  if (!o) return;
+  const f = FURNITURE[o.id]; SFX.play('click');
+  if (f.slots) { releaseInput(); UI.openDisplay(o.uid); }
+  else UI.toast(f.name + (f.desc ? ' · ' + f.desc : ''));
+}
+// tap / click at a screen position (client pixels)
+function walkTap(clientX, clientY) {
+  if (!W3.on || !F3.cam || F3.m !== W3) return;
+  const r = cv.getBoundingClientRect();
+  walkUse(w3Pick((clientX - r.left) / r.width * 2 - 1, -((clientY - r.top) / r.height * 2 - 1)));
+}
+
+// ===================================================================
 // main.js - loop, scaling, input
 // ===================================================================
 const cv = $('cv'), ctx = cv.getContext('2d');
@@ -5467,6 +5726,11 @@ addEventListener('keydown', e => {
     if (e.code === 'Escape') { Game.paused = true; UI.openPanel('pause'); }
   }
 });
+addEventListener('keydown', e => {   // walking around the armory in 3D
+  if (Game.mode !== 'hub' || !W3.on || !$('modal').classList.contains('hidden')) return;
+  if (e.code === 'Escape') walkExit();
+  if (e.code === 'KeyE' || e.code === 'Enter' || e.code === 'Space') { walkUse(W3.target); e.preventDefault(); }
+});
 addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'KeyM' || e.code === 'Tab') Game.mapHeld = false; });
 
 // touch twin-stick on the #touch layer
@@ -5474,9 +5738,10 @@ const touch = $('touch');
 function stickEl(side) { return side === 'L' ? $('stickL') : $('stickR'); }
 touch.addEventListener('pointerdown', e => {
   SFX.init();
-  const fps = f3Active(M);
+  const fps = f3Active(M) || W3.on;
   if (e.pointerType === 'mouse') {
     F3.touch = false;
+    if (W3.on) { W3.md = { lx: e.clientX, ox: e.clientX, oy: e.clientY, moved: 0 }; touch.setPointerCapture(e.pointerId); return; }   // armory walk: drag = look, click = use
     if (fps && !F3.locked && !F3.noLock) { f3Lock(); return; }   // first click only grabs the mouse
     mouse.down = true; touch.setPointerCapture(e.pointerId); return;
   }
@@ -5489,7 +5754,10 @@ touch.addEventListener('pointerdown', e => {
   touch.setPointerCapture(e.pointerId);
 });
 touch.addEventListener('pointermove', e => {
-  if (e.pointerType === 'mouse') { mouse.on = true; const p = toCanvas(e); mouse.x = p.x; mouse.y = p.y; return; }
+  if (e.pointerType === 'mouse') {
+    if (W3.on && W3.md) { f3Turn(e.clientX - W3.md.lx, F3.sens); W3.md.lx = e.clientX; W3.md.moved = Math.max(W3.md.moved, Math.hypot(e.clientX - W3.md.ox, e.clientY - W3.md.oy)); return; }
+    mouse.on = true; const p = toCanvas(e); mouse.x = p.x; mouse.y = p.y; return;
+  }
   const s = sticks[e.pointerId]; if (!s) return;
   if (s.look) { f3Turn(e.clientX - s.lx, F3.touchSens); s.lx = e.clientX; s.moved = Math.max(s.moved, Math.hypot(e.clientX - s.ox, e.clientY - s.oy)); return; }
   let dx = e.clientX - s.ox, dy = e.clientY - s.oy; const d = Math.hypot(dx, dy), R = 50;
@@ -5499,9 +5767,11 @@ touch.addEventListener('pointermove', e => {
   stickEl(s.side).firstChild.style.transform = `translate(${dx}px,${dy}px)`;
 });
 function endStick(e) {
-  if (e.pointerType === 'mouse') { mouse.down = false; return; }
+  if (e.pointerType === 'mouse') { if (W3.md) { if (W3.md.moved < 6 && e.type === 'pointerup') walkTap(e.clientX, e.clientY); W3.md = null; } mouse.down = false; return; }
   const s = sticks[e.pointerId]; if (!s) return;
-  if (s.look) { if (performance.now() - s.t0 < 250 && s.moved < 14) F3.tapFire = 0.3; delete sticks[e.pointerId]; return; }   // quick tap = short burst straight ahead
+  const quick = performance.now() - s.t0 < 250 && s.moved < 14 && e.type === 'pointerup';
+  if (W3.on && quick) walkTap(e.clientX, e.clientY);   // armory walk: tap furniture = use it
+  if (s.look) { if (quick && !W3.on) F3.tapFire = 0.3; delete sticks[e.pointerId]; return; }   // quick tap = short burst straight ahead
   if (s.side === 'R' && performance.now() - s.t0 < 250 && s.moved < 14) inp.autoFire = 0.45; // quick tap = auto-aim burst
   delete sticks[e.pointerId]; stickEl(s.side).style.display = 'none';
 }
@@ -5602,12 +5872,12 @@ function readInput(dt) {
 let hubPtr = null;
 $('app').addEventListener('pointerdown', e => {
   SFX.init();
-  if (!(Game.mode === 'hub') || !$('modal').classList.contains('hidden')) return;
+  if (!(Game.mode === 'hub') || W3.on || !$('modal').classList.contains('hidden')) return;
   if (e.target !== cv && e.target !== $('app') && !e.target.classList.contains('screen')) return;
   hubPtr = { x: e.clientX, y: e.clientY };
 });
 $('app').addEventListener('pointermove', e => {
-  if (Game.mode !== 'hub' || !RE.on || e.pointerType !== 'mouse') return;
+  if (Game.mode !== 'hub' || W3.on || !RE.on || e.pointerType !== 'mouse') return;
   const p = toCanvas(e); roomPointer(p.x, p.y, 'move');
 });
 $('app').addEventListener('pointerup', e => {
@@ -5627,6 +5897,8 @@ $('bContinue').addEventListener('click', () => { SFX.init(); Game.toHub(); });
 $('bSettings').addEventListener('click', () => UI.openPanel('settings'));
 $('bEdit').addEventListener('click', () => UI.enterEdit());
 $('bEditDone').addEventListener('click', () => UI.exitEdit());
+$('bWalk').addEventListener('click', () => walkEnter());
+$('bWalkExit').addEventListener('click', () => walkExit());
 $('mClose').addEventListener('click', () => UI.closeModal());
 $('modal').addEventListener('click', e => { if (e.target === $('modal') && !['result', 'pause'].includes(UI.panel)) UI.closeModal(); });
 $('bSelMove').addEventListener('click', () => { RE.moving = !RE.moving; RE.placeId = null; UI.refreshEdit(); });
@@ -5645,6 +5917,7 @@ window.__esc = () => { // Android back button
   if (!$('modal').classList.contains('hidden')) { if (UI.panel === 'pause') UI.a_resume(); else if (UI.panel !== 'result') UI.closeModal(); return; }
   if (Game.mode === 'mission') { Game.paused = true; UI.openPanel('pause'); return; }
   if (UI.screen === 'edit') { UI.exitEdit(); return; }
+  if (W3.on) { walkExit(); return; }
 };
 
 // ---------------- main loop ----------------
@@ -5668,6 +5941,8 @@ function frameBody(now) {
       if (Game.mapHeld) renderMinimap(ctx, M, clock);
       UI.updateHud(M);
     }
+  } else if (S && W3.on && Game.mode === 'hub') {   // armory in first person
+    SFX.ear(null); walkUpdate(dt); walkRender(ctx, clock, dt);
   } else if (S) {
     f3Show(false); SFX.ear(null);
     updateRoom(dt); renderRoom(ctx, clock);
